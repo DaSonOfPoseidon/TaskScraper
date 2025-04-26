@@ -8,8 +8,11 @@ from selenium import webdriver
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support import expected_conditions as EC
 from dotenv import load_dotenv, set_key
+from tqdm import tqdm
 import openpyxl
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
@@ -20,8 +23,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 cookie_lock = Lock()
 TASK_URL = "http://inside.sockettelecom.com/menu.php?tabid=45&tasktype=12&nDepartmentID=1&width=1440&height=731"
-MAX_THREADS = 6
-
+MAX_THREADS = 5  # global, easy to change later
+PAGE_TIMEOUT = 30  # seconds to allow a page to load
 
 # === Login & Session ===
 def prompt_for_credentials():
@@ -205,7 +208,7 @@ def scrape_department_tasks(driver):
         raise TimeoutException("❌ Timed out waiting for taskElement rows in iframe.")
 
     tasks = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=20) as executor:
         futures = [executor.submit(parse_task_row, row) for row in rows]
         for future in futures:
             result = future.result()
@@ -234,24 +237,35 @@ def filter_and_sort_tasks(tasks, selected_job_types):
         so_id = extract_sales_order_id(task)
         if so_id:
             tasks_by_so[so_id].append(task)
-    final_tasks = []
-    for so_id, task_group in tasks_by_so.items():
-        normalized_names = [normalize_job_name(extract_job_name(t["description"])) for t in task_group]
-        if any("reschedule" in n or "schedule" in n for n in normalized_names):
-            if not any(n in selected_job_types for n in normalized_names):
-                continue
-        added = set()
-        for task in task_group:
-            norm_name = normalize_job_name(extract_job_name(task["description"]))
-            if norm_name in selected_job_types and norm_name not in added:
-                final_tasks.append(task)
-                added.add(norm_name)
+
+    final_tasks = batch_check_sales_orders(tasks_by_so, selected_job_types)
+
     def parse_due_date(task):
         try:
             return datetime.strptime(task["due_date"], "%Y-%m-%d %H:%M:%S")
         except:
             return datetime.max
     return sorted(final_tasks, key=parse_due_date)
+
+def wait_for_so_page(driver, timeout=30): # checks for laoding screen
+    try:
+        WebDriverWait(driver, timeout, poll_frequency=0.2).until(
+            lambda d: d.execute_script("""
+                try {
+                    var iframe = document.getElementById('MainView');
+                    if (!iframe) return false;
+                    var innerDoc = iframe.contentDocument || iframe.contentWindow.document;
+                    return innerDoc && innerDoc.querySelector('h3.taskName') !== null;
+                } catch (e) {
+                    return false;
+                }
+            """)
+        )
+        print("✅ MainView iframe loaded and SO page is ready.")
+        return True
+    except TimeoutException:
+        print("⚠️ Timeout waiting for SO page to fully load.")
+        return False
 
 def export_tasks_to_excel(tasks):
     today = datetime.today().date()
@@ -300,6 +314,141 @@ def bypass_ssl_warning(driver):
     except Exception as e:
         print(f"❌ SSL bypass failed: {e}")
 
+def should_include_so(driver, view_url):
+    try:
+        driver.get(view_url)
+        wait_for_so_page(driver)
+        if check_incomplete_schedule_tasks(driver):
+            print(f"⛔ Skipping {driver.current_url} — Incomplete scheduling tasks found")
+            return False
+        
+        # Check onsite install date
+        try:
+            install_info = driver.find_element(By.ID, "onsiteInstallContainer").text
+            match = re.search(r"(\d{4}-\d{2}-\d{2})", install_info)
+            if match:
+                install_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+                today = datetime.today().date()
+                if install_date > today:
+                    print(f"⛔ Skipping SO {so_id} — Install scheduled for {install_date}")
+                    return False
+        except:
+            pass  # No install date block found — assume OK
+
+        return True
+
+    except Exception as e:
+        print(f"⚠️ Error processing SO {view_url}: {e}")
+        return False
+
+def batch_check_sales_orders(tasks_by_so, selected_job_types):
+    """Batch checks Sales Orders by splitting them across threads"""
+    all_links = list(tasks_by_so.keys())
+    total = len(all_links)
+
+    print(f"🔎 Total Sales Orders to check: {total}")
+
+    # Split SOs roughly evenly
+    chunk_size = (total + MAX_THREADS - 1) // MAX_THREADS  # ceil division
+    chunks = [all_links[i:i + chunk_size] for i in range(0, total, chunk_size)]
+
+    results = []
+
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        futures = []
+        for chunk in chunks:
+            futures.append(executor.submit(check_multiple_sos_worker, chunk, selected_job_types))
+
+        for future in tqdm(futures, desc="Checking Sales Orders", unit="SO"):
+            try:
+                chunk_results = future.result()
+                results.extend(chunk_results)
+            except Exception as e:
+                print(f"⚠️ Error in thread: {e}")
+
+    print(f"✅ {len(results)} Sales Orders passed validation.\n")
+    return results
+
+def check_incomplete_schedule_tasks(driver):
+    try:
+        # Switch into iframe if exists
+        try:
+            driver.switch_to.default_content()
+            iframe = driver.find_element(By.NAME, "MainView")
+            driver.switch_to.frame(iframe)
+            print("🔎 Switched into 'MainView' iframe.")
+        except Exception as e:
+            print(f"⚠️ No 'MainView' iframe found, continuing in current context. ({e})")
+
+        task_containers = driver.find_elements(By.CLASS_NAME, "taskContainer")
+        incomplete_tasks = 0
+        relevant_tasks = 0
+
+        for container in task_containers:
+            try:
+                header = container.find_element(By.TAG_NAME, "h3")
+                title = header.text.lower()
+
+                if any(keyword in title for keyword in ["schedule", "reschedule", "contact customer"]):
+                    relevant_tasks += 1
+                    class_attr = header.get_attribute("class")
+                    if "completed" not in class_attr:
+                        print(f"❌ Incomplete task detected: '{title}' with class '{class_attr}'")
+                        incomplete_tasks += 1
+                    else:
+                        print(f"✅ Completed task detected: '{title}' with class '{class_attr}'")
+            except Exception as e:
+                print(f"⚠️ Error checking task container: {e}")
+
+        print(f"🔎 Checked {relevant_tasks} scheduling tasks: {relevant_tasks - incomplete_tasks} completed, {incomplete_tasks} incomplete.")
+        return incomplete_tasks > 0
+    except Exception as e:
+        print(f"⚠️ Error during schedule/reschedule/contact task check: {e}")
+        return True
+
+def check_multiple_sos_worker(so_links, selected_job_types):
+    """Each thread will open one driver and process multiple SOs"""
+    driver = None
+    results = []
+
+    try:
+        driver = create_driver()
+        handle_login(driver)
+
+        for link in so_links:
+            result = check_single_so(driver, link, selected_job_types)
+            if result:
+                results.append(result)
+
+    except Exception as e:
+        print(f"⚠️ Worker error: {e}")
+
+    finally:
+        if driver:
+            driver.quit()
+
+    return results
+
+def create_driver():
+    """Creates a new Chrome WebDriver instance"""
+    options = webdriver.ChromeOptions()
+    options = webdriver.ChromeOptions()
+    options.add_argument("--headless=new")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--allow-insecure-localhost")
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--allow-running-insecure-content")
+    options.add_argument("--ignore-certificate-errors-spki-list")
+    options.add_argument("--ignore-urlfetcher-cert-requests")
+    options.add_argument("--ignore-ssl-errors=yes")
+    options.add_argument("--test-type")
+    options.page_load_strategy = 'eager'
+    service = Service('chromedriver.exe')  # or your correct path
+    driver = webdriver.Chrome(service=service, options=options)
+    return driver
+
 if __name__ == "__main__":
     options = webdriver.ChromeOptions()
     options.add_argument("--headless=new")
@@ -313,6 +462,7 @@ if __name__ == "__main__":
     options.add_argument("--ignore-urlfetcher-cert-requests")
     options.add_argument("--ignore-ssl-errors=yes")
     options.add_argument("--test-type")
+    options.page_load_strategy = 'eager'
     driver = webdriver.Chrome(options=options)
     handle_login(driver)
     all_tasks = scrape_department_tasks(driver)
