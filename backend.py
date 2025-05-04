@@ -39,6 +39,27 @@ JOB_TYPE_CATEGORIES = {
     },
     "Unknown": set()
 }
+NO_CHARGE_KEYWORDS = [
+    "no charge", "no work done", "speed test only", "checked light"
+]
+CHARGED_KEYWORDS = {
+    "gator": {
+        "keywords": ["gator", "src", "gator box"],
+        "label": "Gator",
+        "price": 50
+    },
+    "splicing": {
+        "keywords": ["splice", "splicing", "spliced"],
+        "label": "Splicing",
+        "price": 60
+    },
+    "Fiber": {
+        "keywords": ["ran fiber", "flat drop", "2ct"],
+        "label": "Fiber Footage",
+        "price": .10,
+        "unit": "ft"
+    },
+}
 
 
 # === Login & Session ===
@@ -162,9 +183,9 @@ def is_billable_job(job_type):
 # === Consultation Task Extraction ===
 def create_driver():
     opts = webdriver.ChromeOptions()
-    #opts.add_argument("--headless=new")
-    #opts.add_argument("--disable-gpu")
-    #opts.add_argument("--no-sandbox")
+    opts.add_argument("--headless=new")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--no-sandbox")
     opts.page_load_strategy = 'eager'
     return webdriver.Chrome(service=Service("chromedriver.exe"), options=opts)
 
@@ -241,8 +262,9 @@ def get_dispatch_work_order_url(driver, ticket_number, log=None):
             desc = cols[1].text.strip().lower()
             url = cols[4].find_element(By.TAG_NAME, "a").get_attribute("href")
 
-        if re.search(rf"ticket\s*#?\s*{ticket_number}", desc, re.IGNORECASE):
-            dispatch_wos.append((int(wo_num), url))
+            if re.search(rf"ticket\s*#?\s*{ticket_number}", desc, re.IGNORECASE):
+                dispatch_wos.append((int(wo_num), url))
+
 
 
         if not dispatch_wos:
@@ -299,6 +321,59 @@ def extract_work_order_notes(driver):
             "combined": ""
         }
 
+def extract_footage(text: str) -> int:
+    pattern = r"(\d+)\s*(ft|feet|foot)"
+    matches = re.findall(pattern, text.lower())
+    if matches:
+        return max(int(match[0]) for match in matches)  # Return the largest if multiple found
+    return 0
+
+
+def extract_quantity(keyword: str, text: str) -> int:
+    # Match patterns like "2 gators", "two gator boxes", "used 3 splice drops"
+    pattern = rf"(?:\b(\d+)|\b(one|two|three|four|five|six|seven|eight|nine|ten))\s+\w*{keyword}"
+    matches = re.findall(pattern, text.lower())
+    word2num = {
+        'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+        'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10
+    }
+
+    if matches:
+        for digit, word in matches:
+            if digit:
+                return int(digit)
+            if word in word2num:
+                return word2num[word]
+    return 1  # Default
+
+def classify_charges(notes: str, threshold: int = 90):
+    text = notes.lower()
+    results = []
+
+    # Check for no charge keywords
+    for kw in NO_CHARGE_KEYWORDS:
+        if fuzz.partial_ratio(kw, text) >= threshold:
+            return []  # free job, skip all charges
+
+    # Check for each charge type
+    for key, info in CHARGED_KEYWORDS.items():
+        for kw in info["keywords"]:
+            if fuzz.partial_ratio(kw, text) >= threshold:
+                if "unit" in info and info["unit"] == "foot":
+                    quantity = extract_footage(text)
+                else:
+                    quantity = extract_quantity(key, text)
+                charge = {
+                    "label": info["label"],
+                    "price": info["price"],
+                    "quantity": quantity,
+                    "total": quantity * info["price"],
+                    "matched": kw
+                }
+                results.append(charge)
+                break  # Avoid duplicates for this type
+
+    return results
 
 def extract_consultation_tasks(driver):
     driver.get(TASK_URL)
@@ -602,6 +677,14 @@ def run_with_progress(driver, tasks, complete_free=False):
 
                     driver.get(wo_url)
                     notes = extract_work_order_notes(driver)
+                    charges = classify_charges(notes["combined"])
+
+                    if not charges:
+                        log_message("🟢 No billable items detected (or marked as no-charge)")
+                    else:
+                        log_message("💰 Detected potential charges:")
+                        for charge in charges:
+                            log_message(f"  - {charge['label']}: {charge['quantity']} × ${charge['price']} → ${charge['total']} (matched '{charge['matched']}')")
 
                     log_message(f"🧾 WO #{wo_number} — Extracted Notes:")
                     for key, val in notes["fields"].items():
