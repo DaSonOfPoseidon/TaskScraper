@@ -27,9 +27,9 @@ def normalize_string(s):
 JOB_TYPE_CATEGORIES = {
     "Free": {
         normalize_string(x) for x in [
-            "WiFi Survey", "NID/IW/CopperTest",
+            "WiFi Survey", "NID/IW/CopperTest", "equipment check"
             "ONT Swap", "STB to ONN Conversion", "Jack/FXS/Phone Check", "Blank",
-            "Go-Live", "Install"
+            "Go-Live", "Install", "rouge ont", "onn swap", "ont dying", "stb swap"
         ]
     },
     "Billable": {
@@ -40,26 +40,198 @@ JOB_TYPE_CATEGORIES = {
     "Unknown": set()
 }
 NO_CHARGE_KEYWORDS = [
-    "no charge", "no work done", "speed test only", "checked light"
+    "no charge", "no work done", "speed test only", "checked light", "swapped ont", "go live", "wasps",
+    "socket tv", "storm damage", "swapped out loco"
 ]
 CHARGED_KEYWORDS = {
-    "gator": {
-        "keywords": ["gator", "src", "gator box"],
-        "label": "Gator",
-        "price": 50
+    "Dispatch/Truck Roll/ Each": { #If DP is charged, charge the customer this
+        "keywords": ["Dispatch/Truck Roll/ Each"],
+        "label": "Dispatch/Truck Roll",
+        "price": 250.0,
+        "unit": "Each",
     },
-    "splicing": {
-        "keywords": ["splice", "splicing", "spliced"],
-        "label": "Splicing",
-        "price": 60
+    "Socket Telecom excavation/ Hr": {
+        "keywords": ["Socket Telecom excavation/ Hr"],
+        "label": "Socket Telecom excavation/ Hr",
+        "price": 350.0,
+        "unit": "Hr",
     },
-    "Fiber": {
-        "keywords": ["ran fiber", "flat drop", "2ct"],
-        "label": "Fiber Footage",
-        "price": .10,
-        "unit": "ft"
+    "Field Investigation and Repair/ Hr": {
+        "keywords": ["Field Investigation and Repair/ Hr"],
+        "label": "Field Investigation and Repair/ Hr",
+        "price": 90.0,
+        "unit": "Hr",
+    },
+    "Allocated Loss Adjustment Expense/ Hr": {
+        "keywords": ["Allocated Loss Adjustment Expense/ Hr"],
+        "label": "Allocated Loss Adjustment Expense/ Hr",
+        "price": 50.0,
+        "unit": "Hr",
+    },
+    "Horizontal boring/ Ft": {
+        "keywords": ["Horizontal boring/ Ft"],
+        "label": "Horizontal boring/ Ft",
+        "price": 9.95,
+        "unit": "Ft",
+    },
+    "Conduit 1.25\" HDPE P125SDR13.5  / Ft": {
+        "keywords": ["Conduit 1.25\" HDPE P125SDR13.5  / Ft"],
+        "label": "Conduit 1.25\" HDPE P125SDR13.5  / Ft",
+        "price": 0.0,
+        "unit": "Ft",
+    },
+    "Duct Coupler-PN 20005096 /Each": {
+        "keywords": ["Duct Coupler-PN 20005096 /Each"],
+        "label": "Duct Coupler-PN 20005096 /Each",
+        "price": 0.0,
+        "unit": "Each",
+    },
+    "Plow  (Socket Telecom)  / Ft": {
+        "keywords": ["Plow  (Socket Telecom)  / Ft"],
+        "label": "Plow  (Socket Telecom)  / Ft",
+        "price": 2.5,
+        "unit": "Ft",
+    },
+    "Pull Through Duct  / Ft": {
+        "keywords": ["Pull Through Duct  / Ft"],
+        "label": "Pull Through Duct  / Ft",
+        "price": 0.9,
+        "unit": "Ft",
+    },
+    "MST Pull  / Ft": {
+        "keywords": ["MST Pull  / Ft"],
+        "label": "MST Pull  / Ft",
+        "price": 0.55,
+        "unit": "Ft",
+    },
+    "Set Medium Hand Hole PN FRP1324-18 /Each": {
+        "keywords": ["Set Medium Hand Hole PN FRP1324-18 /Each"],
+        "label": "Set Medium Hand Hole PN FRP1324-18 /Each",
+        "price": 200.0,
+        "unit": "Each",
+    },
+    "Set MST Box PN JD1220-SGL-B /Each": {
+        "keywords": ["Set MST Box PN JD1220-SGL-B /Each"],
+        "label": "Set MST Box PN JD1220-SGL-B /Each",
+        "price": 200.0,
+        "unit": "Each",
+    },
+    "Set Rainbird Box and Extension PN RBVBJMB/RBVBJMB6EXTB /Each": {
+        "keywords": ["Set Rainbird Box and Extension PN RBVBJMB/RBVBJMB6EXTB /Each"],
+        "label": "Set Rainbird Box and Extension PN RBVBJMB/RBVBJMB6EXTB /Each",
+        "price": 200.0,
+        "unit": "Each",
+    },
+    "Set Vault PN FRP1730-24 /Each": {
+        "keywords": ["Set Vault PN FRP1730-24 /Each"],
+        "label": "Set Vault PN FRP1730-24 /Each",
+        "price": 200.0,
+        "unit": "Each",
+    },
+    "Commscope FOSC450A44NT0A0V Splice Closure A case /Each": {
+        "keywords": ["Commscope FOSC450A44NT0A0V Splice Closure A case /Each"],
+        "label": "Commscope FOSC450A44NT0A0V Splice Closure A case /Each",
+        "price": 75.0,
+        "unit": "Each",
+    },
+    "Commscope FOSC450BS6NT0B0V Splice Closure B case /Each": {
+        "keywords": ["Commscope FOSC450BS6NT0B0V Splice Closure B case /Each"],
+        "label": "Commscope FOSC450BS6NT0B0V Splice Closure B case /Each",
+        "price": 75.0,
+        "unit": "Each",
+    },
+    "Commscope FOSC450C66NT0C6V Splice Closure C case /Each": {
+        "keywords": ["Commscope FOSC450C66NT0C6V Splice Closure C case /Each"],
+        "label": "Commscope FOSC450C66NT0C6V Splice Closure C case /Each",
+        "price": 75.0,
+        "unit": "Each",
+    },
+    "Splice Case Entry /Each": {
+        "keywords": ["Splice Case Entry /Each"],
+        "label": "Splice Case Entry /Each",
+        "price": 200.0,
+        "unit": "Each",
+    },
+    "Commscope CAT: SRC3-U5A1B1BB000  Splice Repair Kit /Each": {
+        "keywords": ["Commscope CAT: SRC3-U5A1B1BB000  Splice Repair Kit /Each"],
+        "label": "Commscope CAT: SRC3-U5A1B1BB000  Splice Repair Kit /Each",
+        "price": 0.0,
+        "unit": "Each",
+    },
+    "Splicing (Socket) per strand /Each": {
+        "keywords": ["Splicing (Socket) per strand /Each"],
+        "label": "Splicing (Socket) per strand /Each",
+        "price": 60.0,
+        "unit": "Each",
+    },
+    "Test Damaged Fiber/ Hr": {
+        "keywords": ["Test Damaged Fiber/ Hr"],
+        "label": "Test Damaged Fiber/ Hr",
+        "price": 35.0,
+        "unit": "Hr",
+    },
+    "Indoor Installation (Performed by Socket Hourly)/ Hr": {
+        "keywords": ["Indoor Installation (Performed by Socket Hourly)/ Hr"],
+        "label": "Indoor Installation (Performed by Socket Hourly)/ Hr",
+        "price": 110.0,
+        "unit": "Hr",
+    },
+    "TII FET1G-01RSAN  Fet1 Splice Enclosure /Each": {
+        "keywords": ["TII FET1G-01RSAN  Fet1 Splice Enclosure /Each"],
+        "label": "TII FET1G-01RSAN  Fet1 Splice Enclosure /Each",
+        "price": 0.0,
+        "unit": "Each",
+    },
+    "144 CT Armored Fiber / Ft": {
+        "keywords": ["144 CT Armored Fiber / Ft"],
+        "label": "144 CT Armored Fiber / Ft",
+        "price": 0.0,
+        "unit": "Ft",
+    },
+    "96 CT Armored Fiber / Ft": {
+        "keywords": ["96 CT Armored Fiber / Ft"],
+        "label": "96 CT Armored Fiber / Ft",
+        "price": 0.0,
+        "unit": "Ft",
+    },
+    "72 CT Armored Fiber / Ft": {
+        "keywords": ["72 CT Armored Fiber / Ft"],
+        "label": "72 CT Armored Fiber / Ft",
+        "price": 0.0,
+        "unit": "Ft",
+    },
+    "48 CT Armored Fiber / Ft": {
+        "keywords": ["48 CT Armored Fiber / Ft"],
+        "label": "48 CT Armored Fiber / Ft",
+        "price": 0.0,
+        "unit": "Ft",
+    },
+    "24 CT Armored Fiber / Ft": {
+        "keywords": ["24 CT Armored Fiber / Ft"],
+        "label": "24 CT Armored Fiber / Ft",
+        "price": 0.0,
+        "unit": "Ft",
+    },
+    "12 Count Drop Fiber / Ft": {
+        "keywords": ["12 Count Drop Fiber / Ft"],
+        "label": "12 Count Drop Fiber / Ft",
+        "price": 0.0,
+        "unit": "Ft",
+    },
+    "6 Count Drop Fiber / Ft": {
+        "keywords": ["6 Count Drop Fiber / Ft"],
+        "label": "6 Count Drop Fiber / Ft",
+        "price": 0.0,
+        "unit": "Ft",
+    },
+    "2 Count Drop Fiber / Ft": {
+        "keywords": ["2 Count Drop Fiber / Ft"],
+        "label": "2 Count Drop Fiber / Ft",
+        "price": 0.0,
+        "unit": "Ft",
     },
 }
+
 
 
 # === Login & Session ===
@@ -328,7 +500,6 @@ def extract_footage(text: str) -> int:
         return max(int(match[0]) for match in matches)  # Return the largest if multiple found
     return 0
 
-
 def extract_quantity(keyword: str, text: str) -> int:
     # Match patterns like "2 gators", "two gator boxes", "used 3 splice drops"
     pattern = rf"(?:\b(\d+)|\b(one|two|three|four|five|six|seven|eight|nine|ten))\s+\w*{keyword}"
@@ -346,7 +517,7 @@ def extract_quantity(keyword: str, text: str) -> int:
                 return word2num[word]
     return 1  # Default
 
-def classify_charges(notes: str, threshold: int = 90):
+def classify_charges(notes: str, threshold: int = 85):
     text = notes.lower()
     results = []
 
@@ -702,7 +873,6 @@ def run_with_progress(driver, tasks, complete_free=False):
             continue
 
     return results, errors
-
 
 if __name__ == "__main__":
     with open(LOG_FILE, "w", encoding="utf-8") as f:
