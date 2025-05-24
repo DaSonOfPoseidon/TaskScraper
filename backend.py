@@ -1,24 +1,32 @@
 import os
 import re
 import time
+import sys
+import signal
+import json
 import pickle
 import traceback
+import getpass
 from tqdm import tqdm
 from rapidfuzz import fuzz, process
-from datetime import datetime
+from datetime import datetime, date
 from collections import Counter, defaultdict
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import TimeoutException, WebDriverException, NoSuchElementException
 from dotenv import load_dotenv, set_key
-from threading import Lock
 
-cookie_lock = Lock()
 TASK_URL = "http://inside.sockettelecom.com/menu.php?tabid=45&tasktype=2&nID=1439&width=1440&height=731"
 PAGE_TIMEOUT = 30
+
+DRY_RUN = False
+
+COOKIE_FIELDS = (
+    "name", "value", "domain", "path", "secure", "httpOnly", "expiry",
+)
 
 LOG_FILE = os.path.join(os.path.join(os.path.dirname(__file__), "..", "Outputs"), "consultation_log.txt")
 def normalize_string(s):
@@ -27,222 +35,25 @@ def normalize_string(s):
 JOB_TYPE_CATEGORIES = {
     "Free": {
         normalize_string(x) for x in [
-            "WiFi Survey", "NID/IW/CopperTest", "equipment check"
+            "WiFi Survey", "NID/IW/CopperTest", "equipment check", "swap router",
             "ONT Swap", "STB to ONN Conversion", "Jack/FXS/Phone Check", "Blank",
-            "Go-Live", "Install", "rouge ont", "onn swap", "ont dying", "stb swap"
+            "Go-Live", "Install", "rouge ont", "onn swap", "ont dying", "stb swap",
+            "Tie down", "onn"
         ]
     },
     "Billable": {
         normalize_string(x) for x in [
-            "ONT Move", "ONT in Disco", "Fiber Cut"
+            "ONT Move", "ONT in Disco", "Fiber Cut", "Broken Fiber"
         ]
     },
     "Unknown": set()
 }
-NO_CHARGE_KEYWORDS = [
-    "no charge", "no work done", "speed test only", "checked light", "swapped ont", "go live", "wasps",
-    "socket tv", "storm damage", "swapped out loco"
-]
-CHARGED_KEYWORDS = {
-    "Dispatch/Truck Roll/ Each": { #If DP is charged, charge the customer this
-        "keywords": ["Dispatch/Truck Roll/ Each"],
-        "label": "Dispatch/Truck Roll",
-        "price": 250.0,
-        "unit": "Each",
-    },
-    "Socket Telecom excavation/ Hr": {
-        "keywords": ["Socket Telecom excavation/ Hr"],
-        "label": "Socket Telecom excavation/ Hr",
-        "price": 350.0,
-        "unit": "Hr",
-    },
-    "Field Investigation and Repair/ Hr": {
-        "keywords": ["Field Investigation and Repair/ Hr"],
-        "label": "Field Investigation and Repair/ Hr",
-        "price": 90.0,
-        "unit": "Hr",
-    },
-    "Allocated Loss Adjustment Expense/ Hr": {
-        "keywords": ["Allocated Loss Adjustment Expense/ Hr"],
-        "label": "Allocated Loss Adjustment Expense/ Hr",
-        "price": 50.0,
-        "unit": "Hr",
-    },
-    "Horizontal boring/ Ft": {
-        "keywords": ["Horizontal boring/ Ft"],
-        "label": "Horizontal boring/ Ft",
-        "price": 9.95,
-        "unit": "Ft",
-    },
-    "Conduit 1.25\" HDPE P125SDR13.5  / Ft": {
-        "keywords": ["Conduit 1.25\" HDPE P125SDR13.5  / Ft"],
-        "label": "Conduit 1.25\" HDPE P125SDR13.5  / Ft",
-        "price": 0.0,
-        "unit": "Ft",
-    },
-    "Duct Coupler-PN 20005096 /Each": {
-        "keywords": ["Duct Coupler-PN 20005096 /Each"],
-        "label": "Duct Coupler-PN 20005096 /Each",
-        "price": 0.0,
-        "unit": "Each",
-    },
-    "Plow  (Socket Telecom)  / Ft": {
-        "keywords": ["Plow  (Socket Telecom)  / Ft"],
-        "label": "Plow  (Socket Telecom)  / Ft",
-        "price": 2.5,
-        "unit": "Ft",
-    },
-    "Pull Through Duct  / Ft": {
-        "keywords": ["Pull Through Duct  / Ft"],
-        "label": "Pull Through Duct  / Ft",
-        "price": 0.9,
-        "unit": "Ft",
-    },
-    "MST Pull  / Ft": {
-        "keywords": ["MST Pull  / Ft"],
-        "label": "MST Pull  / Ft",
-        "price": 0.55,
-        "unit": "Ft",
-    },
-    "Set Medium Hand Hole PN FRP1324-18 /Each": {
-        "keywords": ["Set Medium Hand Hole PN FRP1324-18 /Each"],
-        "label": "Set Medium Hand Hole PN FRP1324-18 /Each",
-        "price": 200.0,
-        "unit": "Each",
-    },
-    "Set MST Box PN JD1220-SGL-B /Each": {
-        "keywords": ["Set MST Box PN JD1220-SGL-B /Each"],
-        "label": "Set MST Box PN JD1220-SGL-B /Each",
-        "price": 200.0,
-        "unit": "Each",
-    },
-    "Set Rainbird Box and Extension PN RBVBJMB/RBVBJMB6EXTB /Each": {
-        "keywords": ["Set Rainbird Box and Extension PN RBVBJMB/RBVBJMB6EXTB /Each"],
-        "label": "Set Rainbird Box and Extension PN RBVBJMB/RBVBJMB6EXTB /Each",
-        "price": 200.0,
-        "unit": "Each",
-    },
-    "Set Vault PN FRP1730-24 /Each": {
-        "keywords": ["Set Vault PN FRP1730-24 /Each"],
-        "label": "Set Vault PN FRP1730-24 /Each",
-        "price": 200.0,
-        "unit": "Each",
-    },
-    "Commscope FOSC450A44NT0A0V Splice Closure A case /Each": {
-        "keywords": ["Commscope FOSC450A44NT0A0V Splice Closure A case /Each"],
-        "label": "Commscope FOSC450A44NT0A0V Splice Closure A case /Each",
-        "price": 75.0,
-        "unit": "Each",
-    },
-    "Commscope FOSC450BS6NT0B0V Splice Closure B case /Each": {
-        "keywords": ["Commscope FOSC450BS6NT0B0V Splice Closure B case /Each"],
-        "label": "Commscope FOSC450BS6NT0B0V Splice Closure B case /Each",
-        "price": 75.0,
-        "unit": "Each",
-    },
-    "Commscope FOSC450C66NT0C6V Splice Closure C case /Each": {
-        "keywords": ["Commscope FOSC450C66NT0C6V Splice Closure C case /Each"],
-        "label": "Commscope FOSC450C66NT0C6V Splice Closure C case /Each",
-        "price": 75.0,
-        "unit": "Each",
-    },
-    "Splice Case Entry /Each": {
-        "keywords": ["Splice Case Entry /Each"],
-        "label": "Splice Case Entry /Each",
-        "price": 200.0,
-        "unit": "Each",
-    },
-    "Commscope CAT: SRC3-U5A1B1BB000  Splice Repair Kit /Each": {
-        "keywords": ["Commscope CAT: SRC3-U5A1B1BB000  Splice Repair Kit /Each"],
-        "label": "Commscope CAT: SRC3-U5A1B1BB000  Splice Repair Kit /Each",
-        "price": 0.0,
-        "unit": "Each",
-    },
-    "Splicing (Socket) per strand /Each": {
-        "keywords": ["Splicing (Socket) per strand /Each"],
-        "label": "Splicing (Socket) per strand /Each",
-        "price": 60.0,
-        "unit": "Each",
-    },
-    "Test Damaged Fiber/ Hr": {
-        "keywords": ["Test Damaged Fiber/ Hr"],
-        "label": "Test Damaged Fiber/ Hr",
-        "price": 35.0,
-        "unit": "Hr",
-    },
-    "Indoor Installation (Performed by Socket Hourly)/ Hr": {
-        "keywords": ["Indoor Installation (Performed by Socket Hourly)/ Hr"],
-        "label": "Indoor Installation (Performed by Socket Hourly)/ Hr",
-        "price": 110.0,
-        "unit": "Hr",
-    },
-    "TII FET1G-01RSAN  Fet1 Splice Enclosure /Each": {
-        "keywords": ["TII FET1G-01RSAN  Fet1 Splice Enclosure /Each"],
-        "label": "TII FET1G-01RSAN  Fet1 Splice Enclosure /Each",
-        "price": 0.0,
-        "unit": "Each",
-    },
-    "144 CT Armored Fiber / Ft": {
-        "keywords": ["144 CT Armored Fiber / Ft"],
-        "label": "144 CT Armored Fiber / Ft",
-        "price": 0.0,
-        "unit": "Ft",
-    },
-    "96 CT Armored Fiber / Ft": {
-        "keywords": ["96 CT Armored Fiber / Ft"],
-        "label": "96 CT Armored Fiber / Ft",
-        "price": 0.0,
-        "unit": "Ft",
-    },
-    "72 CT Armored Fiber / Ft": {
-        "keywords": ["72 CT Armored Fiber / Ft"],
-        "label": "72 CT Armored Fiber / Ft",
-        "price": 0.0,
-        "unit": "Ft",
-    },
-    "48 CT Armored Fiber / Ft": {
-        "keywords": ["48 CT Armored Fiber / Ft"],
-        "label": "48 CT Armored Fiber / Ft",
-        "price": 0.0,
-        "unit": "Ft",
-    },
-    "24 CT Armored Fiber / Ft": {
-        "keywords": ["24 CT Armored Fiber / Ft"],
-        "label": "24 CT Armored Fiber / Ft",
-        "price": 0.0,
-        "unit": "Ft",
-    },
-    "12 Count Drop Fiber / Ft": {
-        "keywords": ["12 Count Drop Fiber / Ft"],
-        "label": "12 Count Drop Fiber / Ft",
-        "price": 0.0,
-        "unit": "Ft",
-    },
-    "6 Count Drop Fiber / Ft": {
-        "keywords": ["6 Count Drop Fiber / Ft"],
-        "label": "6 Count Drop Fiber / Ft",
-        "price": 0.0,
-        "unit": "Ft",
-    },
-    "2 Count Drop Fiber / Ft": {
-        "keywords": ["2 Count Drop Fiber / Ft"],
-        "label": "2 Count Drop Fiber / Ft",
-        "price": 0.0,
-        "unit": "Ft",
-    },
-}
-
-
 
 # === Login & Session ===
 def prompt_for_credentials():
-    from tkinter import Tk, simpledialog
-    root = Tk()
-    root.withdraw()
-    user = simpledialog.askstring("Login", "Username:", parent=root)
-    pw = simpledialog.askstring("Login", "Password:", parent=root, show="*")
-    root.destroy()
-    return user, pw
+    username = input("Username: ")
+    password = getpass.getpass("Password: ")
+    return username, password
 
 def save_env_credentials(user, pw):
     path = ".env"
@@ -267,7 +78,7 @@ def perform_login(driver, user, pw):
     driver.find_element(By.NAME, "username").send_keys(user)
     driver.find_element(By.NAME, "password").send_keys(pw)
     driver.find_element(By.ID, "login").click()
-    time.sleep(2)
+    WebDriverWait(driver, 2)
 
 def handle_login(driver):
     driver.get("http://inside.sockettelecom.com/")
@@ -283,22 +94,44 @@ def handle_login(driver):
     save_cookies(driver)
     log_message("✅ Logged in via credentials")
 
-def save_cookies(driver, filename="cookies.pkl"):
-    with cookie_lock:
-        with open(filename, "wb") as f:
-            pickle.dump(driver.get_cookies(), f)
+def save_cookies(driver, filepath="cookies.pkl"):
+    raw = driver.get_cookies()
+    filtered = [{k: c[k] for k in COOKIE_FIELDS if k in c} for c in raw]
+    with open(filepath, "w") as f:
+        json.dump(filtered, f, indent=2)
+    print(f"Saved {len(filtered)} cookies (JSON) → {filepath}")
 
-def load_cookies(driver, filename="cookies.pkl"):
-    if not os.path.exists(filename): return False
-    try:
-        driver.get("http://inside.sockettelecom.com/")
-        with cookie_lock:
-            cookies = pickle.load(open(filename, "rb"))
-            for cookie in cookies:
-                driver.add_cookie(cookie)
-        return True
-    except:
+def load_cookies(driver, filepath="cookies.pkl") -> bool:
+    if not os.path.exists(filepath):
+        print(f"No cookie file at {filepath}")
         return False
+
+    # 1) Attempt JSON load, else fall back to pickle
+    try:
+        with open(filepath, "r") as f:
+            cookies = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        with open(filepath, "rb") as f:
+            cookies = pickle.load(f)
+
+    now = int(time.time())
+    added = 0
+
+    for c in cookies:
+        exp = c.get("expiry")
+        if exp and exp < now:
+            # skip stale cookies
+            continue
+        # ensure only safe fields (in case pickle payload has extras)
+        safe_cookie = {k: c[k] for k in COOKIE_FIELDS if k in c}
+        try:
+            driver.add_cookie(safe_cookie)
+            added += 1
+        except Exception as e:
+            print(f"⚠️ Skipped cookie {c.get('name')}: {e}")
+
+    print(f"Loaded {added} cookies ← {filepath}")
+    return added > 0
 
 def clear_first_time_overlays(driver):
     # Dismiss alert if present
@@ -327,6 +160,108 @@ def log_message(msg, also_print=False):
     if also_print:
         print(full_msg)
 
+def format_dispatch_summary(driver, job_type):
+    ci = get_customer_and_ticket_info_from_task(driver)
+    if not ci or not ci["ticket"]:
+        return None
+
+    driver.get(ci["customer_url"])
+    wo_url, wo_number = get_dispatch_work_order_url(driver, ci["ticket"])
+    if not wo_url:
+        return None
+
+    driver.get(wo_url)
+    # wait for the form to load
+    WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "AdditionalNotes")))
+
+    status_el = driver.find_element(
+        By.XPATH,
+        "//td[@class='detailHeader' and normalize-space(text())='Status:']"
+        "/following-sibling::td//span"
+    )
+    status = status_el.text.strip()
+
+    if status.lower() != "completed":
+        log_message(f"⚠️ WO {wo_number} is still uncompleted; skipping")
+        return
+
+
+    # pull raw strings
+    arr_date = driver.find_element(By.ID, "ArrivalOnsite").get_attribute("value").strip()
+    arr_time = driver.find_element(By.ID, "ArrivalTime").get_attribute("value").strip()
+    dep_date = driver.find_element(By.ID, "CompletedDate").get_attribute("value").strip()
+    dep_time = driver.find_element(By.ID, "CompletedTime").get_attribute("value").strip()
+
+    # display values (blank → “not given”)
+    if arr_date and re.match(r"\d{4}-\d{2}-\d{2}", arr_date) and arr_time and re.match(r"\d{1,2}:\d{2}", arr_time):
+        arr_display = arr_time
+    else:
+        arr_display = "not given"
+
+    if dep_date and re.match(r"\d{4}-\d{2}-\d{2}", dep_date) and dep_time and re.match(r"\d{1,2}:\d{2}", dep_time):
+        dep_display = dep_time
+    else:
+        dep_display = "not given"
+
+    # compute total_hours only if both arrival and departure are valid
+    if arr_display != "not given" and dep_display != "not given":
+        t_arr = datetime.strptime(f"{arr_date} {arr_time}", "%Y-%m-%d %H:%M")
+        t_dep = datetime.strptime(f"{dep_date} {dep_time}", "%Y-%m-%d %H:%M")
+        hours = (t_dep - t_arr).total_seconds() / 3600
+        # enforce 1h min & quarter‐hour rounding
+        hours = max(hours, 1.0)
+        total_hours = round(hours * 4) / 4
+        total_display = f"{total_hours:.2f}"
+    else:
+        total_display = "1.00"
+
+    notes = extract_work_order_notes(driver)
+    # WORK DONE — prefer the “AdditionalNotes” field if present
+    work_done = notes["fields"].get("AdditionalNotes", notes["combined"]).strip()
+
+    # EQUIPMENT USED — from the EquipmentInstalled textarea, split lines
+    equipment_raw = notes["fields"].get("EquipmentInstalled", "")
+    equipment = [line.strip() for line in equipment_raw.splitlines() if line.strip()]
+
+    # RESPONSIBLE PARTY — look for “damage caused by X” or “X responsible,” else default
+    responsible = "Customer"
+    text = notes["combined"].lower() 
+    # look for “damage caused by ...”
+    m = re.search(r"damage caused by\s+([^.,\n]+)", text, re.IGNORECASE)
+    if m:
+        responsible = m.group(1).strip()
+    else:
+        # look for “... responsible”
+        m2 = re.search(r"([^.,\n]+?)\s+responsible", text, re.IGNORECASE)
+        if m2:
+            responsible = m2.group(1).strip()
+
+        if "brightspeed" in text or "bright speed" in text:
+            responsible = "Brightspeed"
+
+    summary = [
+        f"CUSTOMER: {ci['customer_name']}",
+        f"CID: {ci['cid']}",
+        f"WORK ORDER NUMBER: {wo_number}",
+        f"WORK ORDER LINK: {wo_url}",
+        "",
+        f"Arrival Time: {arr_display}",
+        f"Departure Time: {dep_display}",
+        "",
+        f"Total time of DP: {total_display}",
+        "",
+        "WORK DONE (DISPATCH NOTES):",
+        work_done,
+        "",
+        "EQUIPMENT USED:",
+    ] + equipment + [
+        "",
+        f"RESPONSIBLE PARTY: {responsible}"
+    ]
+    summary_text = "\n".join(summary)
+    log_message(summary_text)
+    return summary_text
+
 def is_free_job(job_type):
     if not job_type:
         return ("(blank)", True, 100)
@@ -351,6 +286,30 @@ def is_billable_job(job_type):
     log_message(f"💰 Matching '{job_type}' → '{match}' (score: {score})")
     return (match, score > 90, score)
 
+def update_notes_only(driver, task_id, summary_text):
+    try:
+        # switch into the MainView frame
+        driver.switch_to.default_content()
+        WebDriverWait(driver, 5).until(
+            EC.frame_to_be_available_and_switch_to_it((By.ID, "MainView"))
+        )
+        expand_task(driver, task_id)
+
+        # update the notes field
+        notes = driver.find_element(By.ID, f"txtNotes{task_id}")
+        notes.clear()
+        notes.send_keys(summary_text)
+
+        # click the Update button
+        btn = driver.find_element(By.ID, f"sub_{task_id}")
+        driver.execute_script("arguments[0].click()", btn)
+
+        log_message(f"✏️  (DRY RUN) Updated notes for task {task_id}")
+        return True
+
+    except Exception as e:
+        log_message(f"❌ update_notes_only failed: {type(e).__name__} - {e}")
+        return False
 
 # === Consultation Task Extraction ===
 def create_driver():
@@ -358,6 +317,9 @@ def create_driver():
     opts.add_argument("--headless=new")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-usb-keyboard-detect")
+    opts.add_argument("--disable-hid-detection")
+    opts.add_argument("--log-level=3")
     opts.page_load_strategy = 'eager'
     return webdriver.Chrome(service=Service("chromedriver.exe"), options=opts)
 
@@ -378,34 +340,45 @@ def get_customer_and_ticket_info_from_task(driver):
     try:
         try:
             driver.switch_to.default_content()
-            WebDriverWait(driver, 5).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "MainView")))
+            WebDriverWait(driver, 5).until(
+                EC.frame_to_be_available_and_switch_to_it((By.ID, "MainView"))
+            )
         except:
             log_message("⚠️ Already in MainView or frame not needed.")
-        try:
-            links = driver.find_elements(By.TAG_NAME, "a")
-            for link in links:
-                href = link.get_attribute("href")
-                if href and "customerid=" in href:
-                    match = re.search(r"customerid=([0-9\-]+)", href)
-                    cid = match.group(1)
-        except Exception as e:
-            print(f"[!] Failed to extract CID from link: {e}")
 
-        # Look for ticket # in the suborder description
         try:
-            desc_cell = driver.find_element(By.XPATH, "//td[contains(., 'Dispatch for Ticket')]")
-            match = re.search(r"Dispatch for Ticket\s+(\d+)", desc_cell.text)
-            ticket_number = match.group(1) if match else None
+            cid = driver.find_element(
+                By.XPATH,
+                "//td[normalize-space(text())='Customer ID']/following-sibling::td/b"
+            ).text.strip()
+            customer_name = driver.find_element(
+                By.XPATH,
+                "//td[normalize-space(text())='Customer Name']/following-sibling::td/b"
+            ).text.strip()
+        except Exception as e:
+            log_message(f"❌ Failed to extract Customer ID/Name: {e}")
+            return None
+
+        try:
+            desc_cell = driver.find_element(
+                By.XPATH,
+                "//td[contains(., 'Dispatch for Ticket')]"
+            )
+            m = re.search(r"Dispatch for Ticket\s+(\d+)", desc_cell.text)
+            ticket_number = m.group(1) if m else None
             log_message(f"✅ Found Ticket #: {ticket_number}")
         except:
             ticket_number = None
             log_message("⚠️ Could not find Ticket # in dispatch description")
-
-        customer_url = f"http://inside.sockettelecom.com/menu.php?coid=1&tabid=7&parentid=9&customerid={cid}"
+        customer_url = (
+            "http://inside.sockettelecom.com/menu.php"
+            "?coid=1&tabid=7&parentid=9&customerid=" + cid
+        )
         return {
-            "cid": cid,
-            "ticket": ticket_number,
-            "customer_url": customer_url
+            "customer_name": customer_name,
+            "cid":            cid,
+            "ticket":         ticket_number,
+            "customer_url":   customer_url
         }
     except Exception as e:
         log_message(f"❌ Failed to get customer/ticket info from task: {e}")
@@ -457,7 +430,7 @@ def get_dispatch_work_order_url(driver, ticket_number, log=None):
 def extract_work_order_notes(driver):
     try:
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "AdditionalNotes")))
-        log_message("✅ WO page loaded, extracting notes...")
+        #log_message("✅ WO page loaded, extracting notes...")
 
         fields = {
             "EquipmentInstalled": "",
@@ -493,70 +466,49 @@ def extract_work_order_notes(driver):
             "combined": ""
         }
 
-def extract_footage(text: str) -> int:
-    pattern = r"(\d+)\s*(ft|feet|foot)"
-    matches = re.findall(pattern, text.lower())
-    if matches:
-        return max(int(match[0]) for match in matches)  # Return the largest if multiple found
-    return 0
-
-def extract_quantity(keyword: str, text: str) -> int:
-    # Match patterns like "2 gators", "two gator boxes", "used 3 splice drops"
-    pattern = rf"(?:\b(\d+)|\b(one|two|three|four|five|six|seven|eight|nine|ten))\s+\w*{keyword}"
-    matches = re.findall(pattern, text.lower())
-    word2num = {
-        'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
-        'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10
-    }
-
-    if matches:
-        for digit, word in matches:
-            if digit:
-                return int(digit)
-            if word in word2num:
-                return word2num[word]
-    return 1  # Default
-
-def classify_charges(notes: str, threshold: int = 85):
-    text = notes.lower()
-    results = []
-
-    # Check for no charge keywords
-    for kw in NO_CHARGE_KEYWORDS:
-        if fuzz.partial_ratio(kw, text) >= threshold:
-            return []  # free job, skip all charges
-
-    # Check for each charge type
-    for key, info in CHARGED_KEYWORDS.items():
-        for kw in info["keywords"]:
-            if fuzz.partial_ratio(kw, text) >= threshold:
-                if "unit" in info and info["unit"] == "foot":
-                    quantity = extract_footage(text)
-                else:
-                    quantity = extract_quantity(key, text)
-                charge = {
-                    "label": info["label"],
-                    "price": info["price"],
-                    "quantity": quantity,
-                    "total": quantity * info["price"],
-                    "matched": kw
-                }
-                results.append(charge)
-                break  # Avoid duplicates for this type
-
-    return results
-
-def extract_consultation_tasks(driver):
+def extract_due_consultation_tasks(driver):
     driver.get(TASK_URL)
-    WebDriverWait(driver, 30).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "MainView")))
-    log_message("Loading Tasks...", also_print=True)
+    # wait for the MainView frame to load and switch into it
+    WebDriverWait(driver, 30).until(
+        EC.frame_to_be_available_and_switch_to_it((By.ID, "MainView"))
+    ) 
+    log_message("Loading Tasks…", also_print=True)
+
+    # grab all task rows
     rows = WebDriverWait(driver, 30).until(
-        EC.presence_of_all_elements_located((By.XPATH, '//tr[contains(@class,"taskElement")]'))
-    )
-    tasks = [parse_task_row(row) for row in rows]
-    consultations = [t for t in tasks if t and "consultation" in t["desc"].lower()]
-    log_message(f"✅ Found {len(consultations)} consultation tasks.", also_print=True)
-    return consultations
+        EC.presence_of_all_elements_located(
+            (By.XPATH, '//tr[contains(@class,"taskElement")]')
+        )
+    ) 
+
+    today = date.today()
+    due_consults = []
+
+    for row in rows:
+        task = parse_task_row(row)
+        if not task or "consultation" not in task["desc"].lower():
+            continue
+
+        # parse the due-date from the 4th <td> nobr
+        try:
+            due_str = row.find_element(
+                By.CSS_SELECTOR, "td:nth-child(4) nobr"
+            ).text.strip()
+            due_dt = datetime.strptime(due_str, "%Y-%m-%d").date()
+        except Exception:
+            log_message(f"⚠️ Couldn't parse due date '{due_str}'; skipping", also_print=True)
+            continue 
+
+        # skip tasks not yet due
+        if due_dt > today:
+            log_message(f"⏳ Skipping '{task['desc']}' (due {due_dt.isoformat()})", also_print=True)
+            continue
+
+        # this is a consultation task due today or overdue
+        due_consults.append(task)
+
+    log_message(f"✅ Found {len(due_consults)} due consultation tasks.", also_print=True)
+    return due_consults
 
 def extract_task_id_from_page(driver):
     try:
@@ -573,22 +525,22 @@ def parse_job_type_from_task(driver, url):
         WebDriverWait(driver, 10).until(
             EC.frame_to_be_available_and_switch_to_it((By.ID, "MainView"))
         )
-        log_message("✅ Switched to MainView for task") #uncomment to enable
+        #log_message("✅ Switched to MainView for task") #uncomment to enable
 
         textarea = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.NAME, "Notes"))
         )
         raw_notes = textarea.get_attribute("value").strip()
-        log_message("✅ Found Notes textarea")
+        #log_message("✅ Found Notes textarea")
 
         match = re.search(r"PROBLEM STATEMENT:\s*<b>(.*?)</b>", raw_notes, re.IGNORECASE)
         if match:
-            log_message("✅ Found bolded problem statement")
+            #log_message("✅ Found bolded problem statement")
             return match.group(1).strip()
 
         match = re.search(r"PROBLEM STATEMENT:\s*(.+)", raw_notes, re.IGNORECASE)
         if match:
-            log_message(f"⚠️ Found plain problem statement: {raw_notes}")
+            log_message(f"⚠️ Found plain problem statement")
             line = match.group(1).strip()
             line = re.sub(r"</?[^>]+>", "", line)
             return line[:100].strip()
@@ -659,17 +611,14 @@ def summarize_job_types(results):
     return job_counter, other_types
 
 def complete_free_task(driver, task_id, job_type, screenshot_dir=None):
-    def log_step(step_desc):
-        log_message(f"[{datetime.now().strftime('%H:%M:%S')}] WO {task_id} — {step_desc}")
-
     def try_complete():
         def debug_element(label, by, value):
             try:
                 el = WebDriverWait(driver, 5).until(EC.presence_of_element_located((by, value)))
-                log_step(f"✔️ Found {label}: {value}")
+                log_message(f"✔️ Found {label}: {value}")
                 return el
             except Exception as e:
-                log_step(f"❌ Failed to locate {label} using {by}={value}: {e}")
+                log_message(f"❌ Failed to locate {label} using {by}={value}: {e}")
                 raise
 
         checkbox = debug_element("checkbox", By.ID, f"completedcheck{task_id}")
@@ -677,88 +626,79 @@ def complete_free_task(driver, task_id, job_type, screenshot_dir=None):
         submit_btn = debug_element("submit button", By.ID, f"sub_{task_id}")
 
         if not checkbox.is_selected():
-            log_step("Clicking 'Completed' checkbox...")
+            log_message("Clicking 'Completed' checkbox...")
             driver.execute_script("arguments[0].click();", checkbox)
         else:
-            log_step("Checkbox already selected.")
+            log_message("Checkbox already selected.")
 
-        log_step("Entering notes...")
+        log_message("Entering notes...")
         notes_box.clear()
         notes_box.send_keys(f"{job_type}, no charge")
 
-        log_step("Clicking 'Update Task' button...")
+        log_message("Clicking 'Update Task' button...")
         driver.execute_script("arguments[0].click();", submit_btn)
 
     for attempt in range(2):
         try:
-            log_step(f"--- Attempt {attempt + 1} to complete task ---")
+            log_message(f"--- Attempt {attempt + 1} to complete task ---")
             try_complete()
-            log_step(f"✅ Successfully completed as free ({job_type})")
+            log_message(f"✅ Successfully completed as free ({job_type})")
             return True
         except Exception as e:
-            log_step(f"⚠️ Attempt {attempt + 1} failed: {type(e).__name__} - {e}")
+            log_message(f"⚠️ Attempt {attempt + 1} failed: {type(e).__name__} - {e}")
             if attempt == 0:
-                time.sleep(1)
+                WebDriverWait(driver, 1)
                 continue
             if screenshot_dir:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 fname = f"wo_{task_id}_fail_{ts}.png"
                 fpath = os.path.join(screenshot_dir, fname)
                 driver.save_screenshot(fpath)
-                log_step(f"📸 Screenshot saved to: {fpath}")
-            log_step("❌ Gave up after retrying")
+                log_message(f"📸 Screenshot saved to: {fpath}")
+            log_message("❌ Gave up after retrying")
             return False
 
-def complete_charged_task(driver, task_id, job_type, screenshot_dir=None):
-    def log_step(step_desc):
-        log_message(f"[{datetime.now().strftime('%H:%M:%S')}] WO {task_id} — {step_desc}")
+def complete_charged_task(driver, task_id, summary_text, screenshot_dir=None):
+    def click_if_needed(el, label):
+        if not el.is_selected():
+            log_message(f"✔️ Clicking {label}")
+            driver.execute_script("arguments[0].click()", el)
 
-    def try_complete():
-        def debug_element(label, by, value):
-            try:
-                el = WebDriverWait(driver, 5).until(EC.presence_of_element_located((by, value)))
-                log_step(f"✔️ Found {label}: {value}")
-                return el
-            except Exception as e:
-                log_step(f"❌ Failed to locate {label} using {by}={value}: {e}")
-                raise
+    try:
+        # wait for the form
+        WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.NAME, "SpawnBillingTask"))
+        )
 
-        checkbox = debug_element("checkbox", By.ID, f"completedcheck{task_id}")
-        notes_box = debug_element("notes box", By.ID, f"txtNotes{task_id}")
-        submit_btn = debug_element("submit button", By.ID, f"sub_{task_id}")
+        # your existing “free job” completion first…
+        checkbox = driver.find_element(By.ID, f"completedcheck{task_id}")
+        click_if_needed(checkbox, "Completed")
 
-        if not checkbox.is_selected():
-            log_step("Clicking 'Completed' checkbox...")
-            driver.execute_script("arguments[0].click();", checkbox)
-        else:
-            log_step("Checkbox already selected.")
+        # now tick spawn‐billing
+        spawn = driver.find_element(By.NAME, "SpawnBillingTask")
+        click_if_needed(spawn, "SpawnBillingTask")
 
-        log_step("Entering billing notes...")
-        notes_box.clear()
-        notes_box.send_keys(f"{job_type}, billed dispatch")
+        # overwrite notes
+        notes = driver.find_element(By.ID, f"txtNotes{task_id}")
+        notes.clear()
+        notes.send_keys(summary_text)
 
-        log_step("Clicking 'Update Task' button...")
-        driver.execute_script("arguments[0].click();", submit_btn)
+        # submit
+        btn = driver.find_element(By.ID, f"sub_{task_id}")
+        log_message("✔️ Clicking Update Task")
+        driver.execute_script("arguments[0].click()", btn)
 
-    for attempt in range(2):
-        try:
-            log_step(f"--- Attempt {attempt + 1} to complete billable task ---")
-            try_complete()
-            log_step(f"✅ Successfully completed as billable ({job_type})")
-            return True
-        except Exception as e:
-            log_step(f"⚠️ Attempt {attempt + 1} failed: {type(e).__name__} - {e}")
-            if attempt == 0:
-                time.sleep(1)
-                continue
-            if screenshot_dir:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                fname = f"wo_{task_id}_fail_{ts}.png"
-                fpath = os.path.join(screenshot_dir, fname)
-                driver.save_screenshot(fpath)
-                log_step(f"📸 Screenshot saved to: {fpath}")
-            log_step("❌ Gave up after retrying")
-            return False
+        log_message("✅ Charged task completed")
+        return True
+
+    except Exception as e:
+        log_message(f"❌ complete_charged_task failed: {e}")
+        if screenshot_dir:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(screenshot_dir, f"fail_{task_id}_{ts}.png")
+            driver.save_screenshot(path)
+            log_message(f"📸 Screenshot: {path}")
+        return False
 
 def expand_task(driver, task_id):
     try:
@@ -771,7 +711,9 @@ def expand_task(driver, task_id):
         # If the span (the content) is not visible, we assume it needs expansion
         if not span.is_displayed() or span.size["height"] < 5:
             legend.click()
-            time.sleep(0.3)
+            WebDriverWait(driver, 5, poll_frequency=0.1).until(
+                EC.visibility_of_element_located((By.ID, f"displaySpan{task_id}"))
+            )
     except Exception as e:
         log_message(f"❌ expand_task(): Failed to expand Task ID {task_id}: {e}")
 
@@ -783,11 +725,18 @@ def dump_debug_html(driver, form_id, task_id):
         f.write(driver.page_source)
     log_message(f"📄 HTML snapshot saved to: {fname}")
 
-def run_with_progress(driver, tasks, complete_free=False):
+def handle_sigterm(signum, frame):
+    print("Received SIGTERM, exiting gracefully.")
+    sys.exit(0)
+
+def run_with_progress(driver, complete_free=False):
     results = []
     errors = []
+    summaries = []
 
-    for task in tqdm(tasks, desc="Parsing tasks", unit="task"):
+    due_tasks = extract_due_consultation_tasks(driver)
+
+    for task in tqdm(due_tasks, desc="Processing consultation tasks", unit="task"):
         try:
             job_type = parse_job_type_from_task(driver, task["url"])
             results.append({
@@ -798,8 +747,8 @@ def run_with_progress(driver, tasks, complete_free=False):
             })
 
             norm_type = job_type.lower().strip()
-            match, is_match, score = is_free_job(norm_type)
-            if complete_free and is_match:
+            match, is_free, score = is_free_job(norm_type)
+            if is_free:
                 log_message(f"[MATCH] '{job_type}' matched as free ({match}) with score {score}")
                 task_id = extract_task_id_from_page(driver)
                 if task_id:
@@ -807,63 +756,54 @@ def run_with_progress(driver, tasks, complete_free=False):
                     expand_task(driver, task_id)
                     log_message(f"✅ Expanded task {task_id}")
 
-                    form_id = f"TOSSTask{task_id}"
-                    try:
-                        WebDriverWait(driver, 12).until(
-                            lambda d: d.find_element(By.ID, form_id).is_displayed()
-                        )
-                        log_message(f"✅ Form {form_id} is now visible")
-                    except Exception as e:
-                        log_message(f"❌ Form {form_id} did not become visible in time: {type(e).__name__}")
-                        dump_debug_html(driver, form_id, task_id, log_message)
-                        errors.append({"Task": task, "Error": f"Form {form_id} not visible", "Traceback": str(e)})
-                        continue
-
-
-                    except TimeoutException:
-                        log_message(f"❌ Timeout waiting for form displayForm{task_id}")
-                        continue
-
-                    success = complete_free_task(driver, task_id, job_type, log_message)
-                    if success:
-                        log_message(f"✔️  Completed Task {task_id} — {job_type}")
+                    note_text = f"{job_type}, no charge"
+                    if DRY_RUN or not complete_free:
+                        success = update_notes_only(driver, task_id, note_text)
+                        if success:
+                            log_message(f"✏️  (DRY RUN) Updated notes for free Task {task_id}")
+                        else:
+                            log_message(f"⚠️  Failed DRY RUN update for free Task {task_id}")
                     else:
-                        log_message(f"⚠️  Failed to complete Task {task_id} — {job_type}")
+                        success = complete_free_task(driver, task_id, job_type, screenshot_dir=None)
+                        if success:
+                            log_message(f"✔️  Completed free Task {task_id} — {job_type}")
+                        else:
+                            log_message(f"⚠️  Failed to complete free Task {task_id} — {job_type}")
+
+                    continue
 
             match, is_billable, score = is_billable_job(norm_type)
             if is_billable:
                 log_message(f"\n💰 '{job_type}' matched as billable ({match}) with score {score}")
                 task_id = extract_task_id_from_page(driver)
-                if task_id:
-                    customer_info = get_customer_and_ticket_info_from_task(driver)
-                    if not customer_info or not customer_info["ticket"]:
-                        log_message("❌ Skipping billable task — missing ticket number.")
-                        continue
+                if not task_id:
+                    continue
 
-                    driver.get(customer_info["customer_url"])
-                    wo_url, wo_number = get_dispatch_work_order_url(driver, customer_info["ticket"])
-                    if not wo_url:
-                        log_message("❌ Skipping billable task — no matching dispatch WO.")
-                        continue
+                # scrape & format everything
+                info = format_dispatch_summary(driver, job_type)
+                if info:
+                    summaries.append(info)
+                else:
+                    log_message(f"❌ Could not format dispatch summary for task {task_id}, skipping.")
+                    continue
 
-                    driver.get(wo_url)
-                    notes = extract_work_order_notes(driver)
-                    charges = classify_charges(notes["combined"])
 
-                    if not charges:
-                        log_message("🟢 No billable items detected (or marked as no-charge)")
+                driver.get(task["url"])
+                WebDriverWait(driver, 5).until(
+                    EC.frame_to_be_available_and_switch_to_it((By.ID, "MainView"))
+                )
+                expand_task(driver, task_id)
+
+                if DRY_RUN:
+                    if update_notes_only(driver, task_id, info):
+                        log_message(f"✔️  Charged Task {task_id} updated successfully")
                     else:
-                        log_message("💰 Detected potential charges:")
-                        for charge in charges:
-                            log_message(f"  - {charge['label']}: {charge['quantity']} × ${charge['price']} → ${charge['total']} (matched '{charge['matched']}')")
-
-                    log_message(f"🧾 WO #{wo_number} — Extracted Notes:")
-                    for key, val in notes["fields"].items():
-                        preview = val.replace("\n", " ")[:100] + ("..." if len(val) > 100 else "")
-                        log_message(f"  {key}: {preview or '[empty]'}")
-
-                    log_message("\n🧾 Combined Notes:")
-                    log_message(notes["combined"] or "[none]")
+                        log_message(f"⚠️  Failed to update Charged Task {task_id}")
+                else:
+                    if complete_charged_task(driver, task_id, info):
+                        log_message(f"✔️  Charged Task {task_id} closed successfully")
+                    else:
+                        log_message(f"⚠️  Failed to close Charged Task {task_id}")
 
         except Exception as e:
             tb = traceback.format_exc()
@@ -875,16 +815,33 @@ def run_with_progress(driver, tasks, complete_free=False):
     return results, errors
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, handle_sigterm)
     with open(LOG_FILE, "w", encoding="utf-8") as f:
         f.write("")
-    driver = create_driver()
-    handle_login(driver)
-    clear_first_time_overlays(driver)
     
-    tasks = extract_consultation_tasks(driver)
-    results, errors = run_with_progress(driver, tasks, complete_free=True)
-    log_message(f"\n✅ Done. Parsed {len(results)} tasks with {len(errors)} errors.", True)
-    summarize_job_types(results)
-    driver.quit()
+    try:
+        driver = create_driver()
+        handle_login(driver)
+        clear_first_time_overlays(driver)
+        results, errors = run_with_progress(driver, complete_free=True)
+        log_message(f"\n✅ Done. Parsed {len(results)} tasks with {len(errors)} errors.", True)
+        summarize_job_types(results)
+
+    except KeyboardInterrupt:
+        print("Keyboard Interupt caught")
+        sys.exit(0)
+
+    except Exception as e:
+        print("Unexpected error, aborting: %s", e)
+        sys.exit(1)
+
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+    
+
+
 
 
