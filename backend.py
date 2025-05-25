@@ -321,7 +321,7 @@ def create_driver():
     opts.add_argument("--disable-hid-detection")
     opts.add_argument("--log-level=3")
     opts.page_load_strategy = 'eager'
-    return webdriver.Chrome(service=Service("chromedriver.exe"), options=opts)
+    return webdriver.Chrome(options=opts)
 
 def parse_task_row(row):
     try:
