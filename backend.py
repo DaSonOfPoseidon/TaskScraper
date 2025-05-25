@@ -160,7 +160,7 @@ def log_message(msg, also_print=False):
     if also_print:
         print(full_msg)
 
-def format_dispatch_summary(driver, job_type):
+def format_dispatch_summary(driver):
     ci = get_customer_and_ticket_info_from_task(driver)
     if not ci or not ci["ticket"]:
         return None
@@ -174,14 +174,13 @@ def format_dispatch_summary(driver, job_type):
     # wait for the form to load
     WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "AdditionalNotes")))
 
-    status_el = driver.find_element(
+    status = driver.find_element(
         By.XPATH,
         "//td[@class='detailHeader' and normalize-space(text())='Status:']"
         "/following-sibling::td//span"
-    )
-    status = status_el.text.strip()
+    ).text.strip().lower()
 
-    if status.lower() != "completed":
+    if status != "complete":
         log_message(f"⚠️ WO {wo_number} is still uncompleted; skipping")
         return
 
@@ -310,6 +309,13 @@ def update_notes_only(driver, task_id, summary_text):
     except Exception as e:
         log_message(f"❌ update_notes_only failed: {type(e).__name__} - {e}")
         return False
+
+def finalize_task(driver, task_id, summary_text, is_free):
+    if DRY_RUN:
+        return update_notes_only(driver, task_id, summary_text)
+    return (complete_free_task if is_free else complete_charged_task)(
+        driver, task_id, summary_text, screenshot_dir=None
+    )
 
 # === Consultation Task Extraction ===
 def create_driver():
@@ -525,38 +531,71 @@ def parse_job_type_from_task(driver, url):
         WebDriverWait(driver, 10).until(
             EC.frame_to_be_available_and_switch_to_it((By.ID, "MainView"))
         )
-        #log_message("✅ Switched to MainView for task") #uncomment to enable
 
         textarea = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.NAME, "Notes"))
         )
         raw_notes = textarea.get_attribute("value").strip()
-        #log_message("✅ Found Notes textarea")
+        lower = raw_notes.lower()
 
-        match = re.search(r"PROBLEM STATEMENT:\s*<b>(.*?)</b>", raw_notes, re.IGNORECASE)
+        # Courtesy / no-charge dispatches → free “Consultation”
+        if "courtesy dispatch" in lower or "no charge" in lower:
+            return "Consultation"
+
+        # Voice/phone issues → Phone Check
+        phone_patterns = [
+            r"\bphone check\b",
+            r"\bjack\b",
+            r"\bfxs\b",
+            r"\bdial tone\b",
+            r"\bno dial tone\b"
+        ]
+        for patt in phone_patterns:
+            if re.search(patt, lower):
+                return "Phone Check"
+
+        # Go‐live / activation → Go-Live
+        if "go live" in lower or "activate" in lower or "turn up" in lower:
+            return "Go-Live"
+
+        # Speed tests → Speed Test
+        if "speed test" in lower or "throughput" in lower or "latency" in lower:
+            return "Speed Test"
+
+        # NID/copper diagnostics → NID/IW/CopperTest
+        if "nid" in lower or "modem swap" in lower:
+            return "NID/IW/CopperTest"
+
+        # allow an optional "(Statement)" after the header, then capture the <b>…</b>
+        match = re.search(
+            r"PROBLEM STATEMENT(?:\s*\(Statement\))?:\s*<b>(.*?)</b>",
+            raw_notes,
+            re.IGNORECASE
+        )
         if match:
-            #log_message("✅ Found bolded problem statement")
             return match.group(1).strip()
 
-        match = re.search(r"PROBLEM STATEMENT:\s*(.+)", raw_notes, re.IGNORECASE)
+        # same optional bit, then plain-text fallback
+        match = re.search(
+            r"PROBLEM STATEMENT(?:\s*\(Statement\))?:\s*(.+)",
+            raw_notes,
+            re.IGNORECASE
+        )
         if match:
-            log_message(f"⚠️ Found plain problem statement")
+            log_message("⚠️ Found plain problem statement")
             line = match.group(1).strip()
-            line = re.sub(r"</?[^>]+>", "", line)
+            line = re.sub(r"</?[^>]+>", "", line)  # strip any stray HTML
             return line[:100].strip()
 
         for line in raw_notes.splitlines()[:15]:
             if "ont" in line.lower() and 3 < len(line.strip()) < 100:
                 log_message("⚠️ Using fallback ONT line")
                 return line.strip()
-            
-        if raw_notes == "":
-            log_message("⚠️ Blank WO Notes")
-            return "Blank"
 
         log_message("❌ Could not identify job type — returning 'Unknown'")
         log_message(f"WO Notes: {raw_notes}")
         return "Unknown"
+
     except Exception as e:
         log_message(f"❌ Failed to parse job type from {url}: {e}")
         raise
@@ -732,13 +771,20 @@ def handle_sigterm(signum, frame):
 def run_with_progress(driver, complete_free=False):
     results = []
     errors = []
-    summaries = []
 
     due_tasks = extract_due_consultation_tasks(driver)
 
     for task in tqdm(due_tasks, desc="Processing consultation tasks", unit="task"):
         try:
             job_type = parse_job_type_from_task(driver, task["url"])
+
+            _, is_free, _ = is_free_job(job_type)
+            _, is_bill, _ = is_billable_job(job_type)
+
+            if not (is_free or is_bill):
+                log_message(f"⏭️ Skipping unknown job type '{job_type}'")
+                continue
+
             results.append({
                 "Company": task["company"],
                 "Description": task["desc"],
@@ -746,64 +792,39 @@ def run_with_progress(driver, complete_free=False):
                 "Job Type": job_type
             })
 
-            norm_type = job_type.lower().strip()
-            match, is_free, score = is_free_job(norm_type)
-            if is_free:
-                log_message(f"[MATCH] '{job_type}' matched as free ({match}) with score {score}")
-                task_id = extract_task_id_from_page(driver)
-                if task_id:
-                    log_message(f"🔍 Task ID {task_id} — preparing to expand and complete...")
-                    expand_task(driver, task_id)
-                    log_message(f"✅ Expanded task {task_id}")
+            task_id = extract_task_id_from_page(driver)
+            if not task_id:
+                log_message(f"⚠️ No Task ID found for '{task['desc']}', skipping")
+                continue
 
-                    note_text = f"{job_type}, no charge"
-                    if DRY_RUN or not complete_free:
-                        success = update_notes_only(driver, task_id, note_text)
-                        if success:
-                            log_message(f"✏️  (DRY RUN) Updated notes for free Task {task_id}")
-                        else:
-                            log_message(f"⚠️  Failed DRY RUN update for free Task {task_id}")
-                    else:
-                        success = complete_free_task(driver, task_id, job_type, screenshot_dir=None)
-                        if success:
-                            log_message(f"✔️  Completed free Task {task_id} — {job_type}")
-                        else:
-                            log_message(f"⚠️  Failed to complete free Task {task_id} — {job_type}")
+            summary_text = format_dispatch_summary(driver)
+            if not summary_text:
+                log_message(f"⚠️ No summary for Task {task_id}, skipping")
+                continue
 
-                    continue
+            driver.get(task["url"])
+            WebDriverWait(driver, PAGE_TIMEOUT).until(
+                EC.frame_to_be_available_and_switch_to_it((By.ID, "MainView"))
+            )
+            expand_task(driver, task_id)
 
-            match, is_billable, score = is_billable_job(norm_type)
-            if is_billable:
-                log_message(f"\n💰 '{job_type}' matched as billable ({match}) with score {score}")
-                task_id = extract_task_id_from_page(driver)
-                if not task_id:
-                    continue
+            success = finalize_task(driver, task_id, summary_text, is_free)
+            if success:
+                action = "(DRY RUN) notes updated" if DRY_RUN else \
+                         "completed free" if is_free else \
+                         "charged & closed"
+                log_message(f"✔️ Task {task_id} {action}")
+            else:
+                log_message(f"⚠️ Failed to finalize Task {task_id}")
 
-                # scrape & format everything
-                info = format_dispatch_summary(driver, job_type)
-                if info:
-                    summaries.append(info)
-                else:
-                    log_message(f"❌ Could not format dispatch summary for task {task_id}, skipping.")
-                    continue
-
-
-                driver.get(task["url"])
-                WebDriverWait(driver, 5).until(
-                    EC.frame_to_be_available_and_switch_to_it((By.ID, "MainView"))
-                )
-                expand_task(driver, task_id)
-
-                if DRY_RUN:
-                    if update_notes_only(driver, task_id, info):
-                        log_message(f"✔️  Charged Task {task_id} updated successfully")
-                    else:
-                        log_message(f"⚠️  Failed to update Charged Task {task_id}")
-                else:
-                    if complete_charged_task(driver, task_id, info):
-                        log_message(f"✔️  Charged Task {task_id} closed successfully")
-                    else:
-                        log_message(f"⚠️  Failed to close Charged Task {task_id}")
+            results.append({
+                "Company":     task["company"],
+                "Description": task["desc"],
+                "URL":         task["url"],
+                "Job Type":    job_type,
+                "Task ID":     task_id,
+                "Mode":        "Free" if is_free else "Billable"
+            })
 
         except Exception as e:
             tb = traceback.format_exc()
@@ -841,7 +862,3 @@ if __name__ == "__main__":
         except Exception:
             pass
     
-
-
-
-
