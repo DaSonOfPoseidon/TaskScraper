@@ -17,6 +17,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv, set_key
 
 TASK_URL = "http://inside.sockettelecom.com/menu.php?tabid=45&tasktype=2&nID=1439&width=1440&height=731"
@@ -319,7 +320,9 @@ def finalize_task(driver, task_id, summary_text, is_free):
 
 # === Consultation Task Extraction ===
 def create_driver():
+    print("test")
     opts = webdriver.ChromeOptions()
+    opts.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium-browser")
     opts.add_argument("--headless=new")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
@@ -327,7 +330,9 @@ def create_driver():
     opts.add_argument("--disable-hid-detection")
     opts.add_argument("--log-level=3")
     opts.page_load_strategy = 'eager'
-    return webdriver.Chrome(service=Service("chromedriver.exe"), options=opts)
+    service = Service(ChromeDriverManager().install())
+    print("icles")
+    return webdriver.Chrome(service=service, options=opts)
 
 def parse_task_row(row):
     try:
