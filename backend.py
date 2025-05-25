@@ -314,6 +314,7 @@ def update_notes_only(driver, task_id, summary_text):
 
 # === Consultation Task Extraction ===
 def create_driver():
+    print("test")
     opts = webdriver.ChromeOptions()
     opts.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium-browser")
     opts.add_argument("--headless=new")
@@ -324,7 +325,7 @@ def create_driver():
     opts.add_argument("--log-level=3")
     opts.page_load_strategy = 'eager'
     service = Service(ChromeDriverManager().install())
-    print("testicles")
+    print("icles")
     return webdriver.Chrome(service=service, options=opts)
 
 def parse_task_row(row):
