@@ -324,6 +324,7 @@ def create_driver():
     opts.add_argument("--log-level=3")
     opts.page_load_strategy = 'eager'
     service = Service(ChromeDriverManager().install())
+    print("testicles")
     return webdriver.Chrome(service=service, options=opts)
 
 def parse_task_row(row):
