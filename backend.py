@@ -17,6 +17,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv, set_key
 
 TASK_URL = "http://inside.sockettelecom.com/menu.php?tabid=45&tasktype=2&nID=1439&width=1440&height=731"
@@ -320,9 +321,9 @@ def create_driver():
     opts.add_argument("--disable-usb-keyboard-detect")
     opts.add_argument("--disable-hid-detection")
     opts.add_argument("--log-level=3")
-    opts.binary_location = "/usr/bin/chromium"
     opts.page_load_strategy = 'eager'
-    return webdriver.Chrome(options=opts)
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=opts)
 
 def parse_task_row(row):
     try:
