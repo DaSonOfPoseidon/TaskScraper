@@ -4,6 +4,8 @@ import time
 import sys
 import signal
 import json
+import platform
+import shutil
 import pickle
 import traceback
 import getpass
@@ -320,18 +322,55 @@ def finalize_task(driver, task_id, summary_text, is_free):
 
 # === Consultation Task Extraction ===
 def create_driver():
-    print("test")
+    # 1) Try CHROME_BIN or which()
+    chrome_bin = os.environ.get("CHROME_BIN") or (
+        shutil.which("google-chrome")
+        or shutil.which("chrome")
+        or shutil.which("chromium-browser")
+        or shutil.which("chromium")
+    )
+
+    # 2) If on Windows, look in the standard install dirs
+    if not chrome_bin and platform.system() == "Windows":
+        for p in (
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ):
+            if os.path.exists(p):
+                chrome_bin = p
+                break
+
+    if not chrome_bin or not os.path.exists(chrome_bin):
+        raise RuntimeError(
+            "Chrome/Chromium binary not found – either install Chrome or set CHROME_BIN "
+            f"(tried: {chrome_bin!r})"
+        )
+
+    # 3) Configure options
     opts = webdriver.ChromeOptions()
-    opts.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium-browser")
+    opts.binary_location = chrome_bin
     opts.add_argument("--headless=new")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-usb-keyboard-detect")
     opts.add_argument("--disable-hid-detection")
     opts.add_argument("--log-level=3")
-    opts.page_load_strategy = 'eager'
-    service = Service(ChromeDriverManager().install())
-    print("icles")
+    opts.page_load_strategy = "eager"
+
+    # 4) Pick the right driver
+    system = platform.system()
+    machine = platform.machine().lower()
+    if system == "Linux" and ("arm" in machine or "aarch64" in machine):
+        # Raspberry Pi (ARM)
+        driver_path = "/usr/bin/chromedriver"
+        if not os.path.exists(driver_path):
+            raise RuntimeError("ARM chromedriver not found; please `apt install chromium-driver`")
+        service = Service(driver_path)
+    else:
+        # x86 Linux or Windows → dynamic download
+        service = Service(ChromeDriverManager().install())
+
+    # 5) Launch
     return webdriver.Chrome(service=service, options=opts)
 
 def parse_task_row(row):
