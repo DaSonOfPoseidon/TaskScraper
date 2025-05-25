@@ -320,6 +320,7 @@ def create_driver():
     opts.add_argument("--disable-usb-keyboard-detect")
     opts.add_argument("--disable-hid-detection")
     opts.add_argument("--log-level=3")
+    opts.binary_location = "/usr/bin/chromium-browser"
     opts.page_load_strategy = 'eager'
     return webdriver.Chrome(options=opts)
 
