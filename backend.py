@@ -315,6 +315,7 @@ def update_notes_only(driver, task_id, summary_text):
 # === Consultation Task Extraction ===
 def create_driver():
     opts = webdriver.ChromeOptions()
+    opts.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium-browser")
     opts.add_argument("--headless=new")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
