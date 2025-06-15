@@ -22,16 +22,24 @@ from selenium.common.exceptions import TimeoutException, WebDriverException, NoS
 from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv, set_key
 
+HERE        = os.path.abspath(os.path.dirname(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
+OUTPUT_DIR  = os.path.join(PROJECT_ROOT, "Outputs")
+COOKIE_PATH = os.path.join(PROJECT_ROOT, "cookies.pkl")
+ENV_PATH    = os.path.join(PROJECT_ROOT, ".env")
+
 TASK_URL = "http://inside.sockettelecom.com/menu.php?tabid=45&tasktype=2&nID=1439&width=1440&height=731"
 PAGE_TIMEOUT = 30
 
 DRY_RUN = False
 
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 COOKIE_FIELDS = (
     "name", "value", "domain", "path", "secure", "httpOnly", "expiry",
 )
 
-LOG_FILE = os.path.join(os.path.join(os.path.dirname(__file__), "..", "Outputs"), "consultation_log.txt")
+LOG_FILE = os.path.join(OUTPUT_DIR, "consultation_log.txt")
 def normalize_string(s):
     return re.sub(r'[^a-z0-9 ]+', '', s.lower()).strip()
 
@@ -46,7 +54,7 @@ JOB_TYPE_CATEGORIES = {
     },
     "Billable": {
         normalize_string(x) for x in [
-            "ONT Move", "ONT in Disco", "Fiber Cut", "Broken Fiber"
+            "ONT Move", "ONT in Disco", "Fiber Cut", "Broken Fiber", "Fiber Move"
         ]
     },
     "Unknown": set()
@@ -59,7 +67,7 @@ def prompt_for_credentials():
     return username, password
 
 def save_env_credentials(user, pw):
-    path = ".env"
+    path = ENV_PATH
     if not os.path.exists(path): open(path, "w").close()
     set_key(path, "UNITY_USER", user)
     set_key(path, "PASSWORD", pw)
@@ -97,24 +105,24 @@ def handle_login(driver):
     save_cookies(driver)
     log_message("✅ Logged in via credentials")
 
-def save_cookies(driver, filepath="cookies.pkl"):
+def save_cookies(driver, filename=None):
     raw = driver.get_cookies()
     filtered = [{k: c[k] for k in COOKIE_FIELDS if k in c} for c in raw]
-    with open(filepath, "w") as f:
+    with open(COOKIE_PATH, "w") as f:
         json.dump(filtered, f, indent=2)
-    print(f"Saved {len(filtered)} cookies (JSON) → {filepath}")
+    print(f"Saved {len(filtered)} cookies (JSON) → {COOKIE_PATH}")
 
-def load_cookies(driver, filepath="cookies.pkl") -> bool:
-    if not os.path.exists(filepath):
-        print(f"No cookie file at {filepath}")
+def load_cookies(driver, filenameh=None) -> bool:
+    if not os.path.exists(COOKIE_PATH):
+        print(f"No cookie file at {COOKIE_PATH}")
         return False
 
     # 1) Attempt JSON load, else fall back to pickle
     try:
-        with open(filepath, "r") as f:
+        with open(COOKIE_PATH, "r") as f:
             cookies = json.load(f)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        with open(filepath, "rb") as f:
+        with open(COOKIE_PATH, "rb") as f:
             cookies = pickle.load(f)
 
     now = int(time.time())
@@ -133,7 +141,7 @@ def load_cookies(driver, filepath="cookies.pkl") -> bool:
         except Exception as e:
             print(f"⚠️ Skipped cookie {c.get('name')}: {e}")
 
-    print(f"Loaded {added} cookies ← {filepath}")
+    print(f"Loaded {added} cookies ← {COOKIE_PATH}")
     return added > 0
 
 def clear_first_time_overlays(driver):
@@ -355,6 +363,7 @@ def create_driver():
     opts.add_argument("--disable-usb-keyboard-detect")
     opts.add_argument("--disable-hid-detection")
     opts.add_argument("--log-level=3")
+    opts.set_capability("unhandledPromptBehavior", "dismiss")
     opts.page_load_strategy = "eager"
 
     # 4) Pick the right driver
@@ -783,6 +792,48 @@ def complete_charged_task(driver, task_id, summary_text, screenshot_dir=None):
             log_message(f"📸 Screenshot: {path}")
         return False
 
+def normalize_note_content(text):
+    if not text:
+        return ""
+    # Convert <br> and <br/> to \n
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    # Remove all other HTML tags
+    text = re.sub(r"<[^>]+>", "", text)
+    # Collapse all whitespace to single spaces, except for newlines
+    text = re.sub(r"[ \t]+", " ", text)
+    # Collapse multiple blank lines
+    text = re.sub(r"\n+", "\n", text)
+    return text.strip()
+
+def extract_static_summary_block(summary_text):
+    idx = summary_text.find("CUSTOMER:")
+    if idx >= 0:
+        return summary_text[idx:].strip()
+    return summary_text.strip()
+
+def notes_already_contain_summary(driver, task_id, summary_text):
+    log_message(f"===> notes_already_contain_summary CALLED for {task_id}")
+    try:
+        # Grab the <td> that has all the rendered notes history
+        notes_td = driver.find_element(By.XPATH, '//td[contains(., "CUSTOMER:")]')
+        notes_html = notes_td.get_attribute('innerHTML')
+        #log_message(f"Current rendered notes: {notes_html}")
+
+        # Normalize both notes and summary for robust comparison
+        notes = normalize_note_content(notes_html)
+        summary = normalize_note_content(extract_static_summary_block(summary_text))
+        #log_message(f"🔎 NORMALIZED NOTES for {task_id}:\n{notes!r}")
+        #log_message(f"🔎 NORMALIZED SUMMARY for {task_id}:\n{summary!r}")
+
+        found = summary and summary in notes
+        log_message(f"🔍 SUMMARY FOUND IN NOTES? {found}")
+
+        return found
+
+    except Exception as e:
+        log_message(f"⚠️ Failed to read notes for Task {task_id}: {e}")
+        return False
+    
 def expand_task(driver, task_id):
     try:
         # Locate the span wrapping the form
@@ -826,7 +877,37 @@ def run_with_progress(driver, complete_free=False):
             _, is_bill, _ = is_billable_job(job_type)
 
             if not (is_free or is_bill):
-                log_message(f"⏭️ Skipping unknown job type '{job_type}'")
+                log_message(f"⚠️ Unknown job type '{job_type}', will update notes only (no complete/billing).")
+                task_id = extract_task_id_from_page(driver)
+                if not task_id:
+                    log_message(f"⚠️ No Task ID found for '{task['desc']}', skipping")
+                    continue
+
+                summary_text = format_dispatch_summary(driver)
+                if not summary_text:
+                    log_message(f"⚠️ No summary for Task {task_id}, skipping")
+                    continue
+
+                driver.get(task["url"])
+                WebDriverWait(driver, PAGE_TIMEOUT).until(
+                    EC.frame_to_be_available_and_switch_to_it((By.ID, "MainView"))
+                )
+                expand_task(driver, task_id)
+
+                if notes_already_contain_summary(driver, task_id, summary_text):
+                    log_message(f"⏭️ Task {task_id} already has summary notes, skipping update")
+                    continue
+
+                update_notes_only(driver, task_id, summary_text)
+                log_message(f"✔️ Task {task_id} (Unknown job) notes updated only (no complete/bill)")
+                results.append({
+                    "Company":     task["company"],
+                    "Description": task["desc"],
+                    "URL":         task["url"],
+                    "Job Type":    job_type,
+                    "Task ID":     task_id,
+                    "Mode":        "Unknown-NotesOnly"
+                })
                 continue
 
             results.append({
