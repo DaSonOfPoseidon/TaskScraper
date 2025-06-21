@@ -22,7 +22,7 @@ ENV_PATH    = os.path.join(PROJECT_ROOT, ".env")
 LOG_FILE = os.path.join(OUTPUT_DIR, "consultation_log.txt")
 
 TASK_URL = "http://inside.sockettelecom.com/menu.php?tabid=45&tasktype=2&nID=1439&width=1440&height=731"
-PAGE_TIMEOUT = 30
+PAGE_TIMEOUT = 15
 
 DRY_RUN = False
 
@@ -52,7 +52,7 @@ JOB_TYPE_CATEGORIES = {
     "Unknown": set()
 }
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeout
 class PlaywrightDriver:
     def __init__(self,
                  headless: bool = True,
@@ -78,7 +78,7 @@ class PlaywrightDriver:
         self.page.on("dialog", lambda dlg: dlg.dismiss())
         self.page.route("**/*.{png,svg}", lambda route: route.abort())
 
-    def goto(self, url: str, *, timeout: int = 30_000, wait_until: str = "networkidle"):
+    def goto(self, url: str, *, timeout: int = 5_000, wait_until: str = "load"):
 
         try:
             return self.page.goto(url, timeout=timeout, wait_until=wait_until)
@@ -193,7 +193,7 @@ def format_dispatch_summary(driver):
     if not ci or not ci["ticket"]:
         return None
 
-    timed_goto(driver, ci["customer_url"])
+    timed_goto(driver, ci["customer_url"], wait_until="load")
     wo_url, wo_number = get_dispatch_work_order_url(driver, ci["ticket"])
     if not wo_url:
         return None
@@ -205,9 +205,11 @@ def format_dispatch_summary(driver):
     el = driver.locator("xpath=//td[@class='detailHeader' and normalize-space(text())='Status:']"
         "/following-sibling::td//span"
     ).first
-    status = el.inner_text()
+    status = el.inner_text().strip().lower()
+    log_message(f"WO {wo_number} status → {status!r}")
 
-    if status != "complete":
+    # accept both "complete" and "completed"
+    if status not in ("complete", "completed"):
         log_message(f"⚠️ WO {wo_number} is still uncompleted; skipping")
         return
 
@@ -312,36 +314,72 @@ def is_billable_job(job_type):
     log_message(f"💰 Matching '{job_type}' → '{match}' (score: {score})")
     return (match, score > 90, score)
 
-def update_notes_only(driver, task_id, summary_text):
+def update_notes_only(frame, task_id, summary_text, log=log_message):
     try:
-        # switch into the MainView frame
-        frame = driver.frame(name="MainView")
-        if not frame:
-            raise RuntimeError("…")
-        expand_task(driver, task_id)
+        # 1) re-expand in case something collapsed it
+        expand_task(frame, task_id)
 
-        # update the notes field
-        notes = driver.locator(f"#txtNotes{task_id}")
+        # 2) clear & fill the notes textarea
+        notes = frame.locator(f"#txtNotes{task_id}")
         notes.clear()
-        notes.send_keys(summary_text)
+        notes.fill(summary_text)
 
-        # click the Update button
-        btn = driver.locator(f"sub_{task_id}").first
+        # 3) click the update button
+        btn = frame.locator(f"#sub_{task_id}")
         btn.click()
 
-        log_message(f"✏️  (DRY RUN) Updated notes for task {task_id}")
+        log(f"✏️  Updated notes for task {task_id}")
         return True
 
     except Exception as e:
         log_message(f"❌ update_notes_only failed: {type(e).__name__} - {e}")
         return False
 
-def finalize_task(driver, task_id, summary_text, is_free):
-    if DRY_RUN:
-        return update_notes_only(driver, task_id, summary_text)
-    return (complete_free_task if is_free else complete_charged_task)(
-        driver, task_id, summary_text, screenshot_dir=None
-    )
+def finalize_task(page: Page, task_id: int, summary_text: str, is_free: bool) -> bool:
+    try:
+        # Always use the MainView iframe context
+        frame = page.frame(name="MainView")
+        if not frame:
+            raise Exception("MainView iframe not found!")
+
+        form_sel = f'form#TOSSTask{task_id}'
+
+        # Wait explicitly for form visibility IN FRAME
+        frame.wait_for_selector(form_sel, timeout=10_000)
+
+        # Fill the Notes box
+        notes_sel = f'#{ "txtNotes" + str(task_id) }'
+        frame.wait_for_selector(notes_sel, timeout=10_000)
+        frame.fill(notes_sel, summary_text)
+
+        # For billable tasks, tick "Spawn Billing Task"
+        if not is_free:
+            billing_sel = 'input[name="SpawnBillingTask"]'
+            frame.wait_for_selector(billing_sel, timeout=5_000)
+            billing_checkbox = frame.locator(billing_sel)
+            if not billing_checkbox.is_checked():
+                billing_checkbox.check()
+
+        # Mark as completed
+        completed_sel = f'#completedcheck{task_id}'
+        frame.wait_for_selector(completed_sel, timeout=5_000)
+        completed_checkbox = frame.locator(completed_sel)
+        if not completed_checkbox.is_checked():
+            completed_checkbox.check()
+
+        # Click the Update Task button
+        update_button_sel = f'#sub_{task_id}'
+        frame.click(update_button_sel)
+
+        log_message(f"✅ Task {task_id} successfully finalized")
+        return True
+
+    except PlaywrightTimeout as e:
+        log_message(f"❌ Timeout in finalize_task for task {task_id}: {e}")
+        return False
+    except Exception as e:
+        log_message(f"❌ Error in finalize_task for task {task_id}: {e}")
+        return False
 
 def attach_network_listeners(page):
     page.on("response", lambda response: _log_response(response))
@@ -648,88 +686,63 @@ def parse_job_type_from_task(driver, url):
         log_message(f"❌ Failed to parse job type from {url}: {e}")
         raise
 
-def complete_free_task(driver, task_id, job_type, screenshot_dir=None):
-    frame = page.frame(name="MainView")
-    if frame is None:
-        frame = page.main_frame()
+def complete_free_task(page: Page, task_id: int, summary_text: str) -> bool:
+    # 1) Expand the task details
+    page.click(f'#displaySpan{task_id} + img')
+    page.wait_for_selector(f'form#TOSSTask{task_id}', timeout=5000)
 
+    # 2) Fill in the notes and submit
+    page.fill(
+        f'form#TOSSTask{task_id} textarea[name="Notes"]',
+        summary_text
+    )
+    page.click(
+        f'form#TOSSTask{task_id} input[type="submit"][value="Update Task"]'
+    )
+    page.wait_for_load_state('networkidle')
 
-    def try_complete():
-        def debug_el(label, sel, timeout=5_000):
-            el = frame.wait_for_selector(sel, timeout=timeout)
-            log_message(f"✔️ Found {label}: {sel}")
-            return el
+    # 3) Tick the Completed box
+    completed = page.locator(
+        f'form#TOSSTask{task_id} input[name="nCompleted"]'
+    )
+    completed.wait_for(state='visible', timeout=5000)
+    if not completed.is_checked():
+        completed.check()
 
-        chk = debug_el("checkbox", f"#completedcheck{task_id}")
-        if not chk.is_checked():
-            log_message("Clicking 'Completed' checkbox...")
-            chk.click()
-        else:
-            log_message("Checkbox already selected.")
+    return True
 
-        notes = debug_el("notes box", f"#txtNotes{task_id}")
-        notes.fill(f"{job_type}, no charge")
+def complete_charged_task(page: Page, task_id: int, summary_text: str) -> bool:
+    # 1) Expand the task details
+    page.click(f'#displaySpan{task_id} + img')
+    page.wait_for_selector(f'form#TOSSTask{task_id}', timeout=5000)
 
-        btn = debug_el("submit button", f"#sub_{task_id}")
-        log_message("Clicking 'Update Task' button...")
-        btn.click()
+    # 2) Fill in the notes and submit
+    page.fill(
+        f'form#TOSSTask{task_id} textarea[name="Notes"]',
+        summary_text
+    )
+    page.click(
+        f'form#TOSSTask{task_id} input[type="submit"][value="Update Task"]'
+    )
+    page.wait_for_load_state('networkidle')
 
-    for attempt in range(2):
-        try:
-            log_message(f"--- Attempt {attempt+1} to complete task ---")
-            try_complete()
-            log_message(f"✅ Successfully completed as free ({job_type})")
-            return True
-        except Exception as e:
-            log_message(f"⚠️ Attempt {attempt+1} failed: {type(e).__name__} - {e}")
-            if attempt == 0:
-                frame.wait_for_timeout(1_000)
-                continue
-            if screenshot_dir:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                path = os.path.join(screenshot_dir, f"wo_{task_id}_fail_{ts}.png")
-                driver.screenshot(path=path)
-                log_message(f"📸 Screenshot saved to: {path}")
-            log_message("❌ Gave up after retrying")
-            return False
+    # 3) Spawn the billing sub-task
+    billing = page.locator(
+        f'form#TOSSTask{task_id} input[name="SpawnBillingTask"]'
+    )
+    billing.wait_for(state='visible', timeout=5000)
+    if not billing.is_checked():
+        billing.check()
 
-def complete_charged_task(driver, task_id, summary_text, screenshot_dir=None):
-    frame = page.frame(name="MainView")
-    if frame is None:
-        frame = page.main_frame()
+    # 4) Tick the Completed box
+    completed = page.locator(
+        f'form#TOSSTask{task_id} input[name="nCompleted"]'
+    )
+    completed.wait_for(state='visible', timeout=5000)
+    if not completed.is_checked():
+        completed.check()
 
-    try:
-        frame.wait_for_selector("[name=SpawnBillingTask]", timeout=5_000)
-
-        def click_if_needed(el, label):
-            if not el.is_checked():
-                log_message(f"✔️ Clicking {label}")
-                el.click()
-
-        checkbox = frame.locator(f"#completedcheck{task_id}")
-        click_if_needed(checkbox, "Completed")
-
-        spawn = frame.locator("[name=SpawnBillingTask]")
-        click_if_needed(spawn, "SpawnBillingTask")
-
-        notes = frame.locator(f"#txtNotes{task_id}")
-        notes.fill(summary_text)
-
-        btn = frame.locator(f"#sub_{task_id}")
-        log_message("✔️ Clicking Update Task")
-        btn.click()
-
-        log_message("✅ Charged task completed")
-        return True
-
-    except Exception as e:
-        log_message(f"❌ complete_charged_task failed: {e}")
-        if screenshot_dir:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = os.path.join(screenshot_dir, f"fail_{task_id}_{ts}.png")
-            driver.screenshot(path=path)
-            log_message(f"📸 Screenshot: {path}")
-        return False
+    return True
 
 def normalize_note_content(text):
     if not text:
@@ -750,45 +763,52 @@ def extract_static_summary_block(summary_text):
         return summary_text[idx:].strip()
     return summary_text.strip()
 
-def notes_already_contain_summary(driver, task_id, summary_text):
-    log_message(f"===> notes_already_contain_summary CALLED for {task_id}")
+def notes_already_contain_summary(frame, task_id, summary_text, log=log_message):
+    log(f"===> notes_already_contain_summary CALLED for {task_id}")
     try:
-        # Grab the <td> that has all the rendered notes history
-        notes_td = driver.locator("xpath=//td[contains(., 'CUSTOMER:')]")
-        # Playwright Locator.inner_html() returns the element's HTML
+        # Look for the <td> that contains the history; use frame.locator
+        notes_td = frame.locator("xpath=//td[contains(., 'CUSTOMER:')]")
         notes_html = notes_td.inner_html()
 
-        # Normalize both notes and summary for robust comparison
         notes   = normalize_note_content(notes_html)
-        summary = normalize_note_content(extract_static_summary_block(summary_text))
+        summary = normalize_note_content(
+                      extract_static_summary_block(summary_text)
+                  )
 
         found = bool(summary and summary in notes)
-        log_message(f"🔍 SUMMARY FOUND IN NOTES? {found}")
+        log(f"🔍 SUMMARY FOUND IN NOTES? {found}")
         return found
 
     except Exception as e:
-        log_message(f"⚠️ Failed to read notes for Task {task_id}: {e}")
+        log(f"⚠️ Failed to read notes for Task {task_id}: {e}")
         return False
 
-def expand_task(driver, task_id):
+def expand_task(frame, task_id, log=log_message):
+    """
+    Expands the hidden task form inside MainView iframe.
+    `frame` should be driver.frame(name="MainView") or driver.main_frame().
+    """
+    span_sel   = f"#displaySpan{task_id}"
+    # This locator jumps from the span to its legend in one shot:
+    legend_sel = f"{span_sel} >> xpath=ancestor::fieldset[1]//legend"
+
     try:
-        # Locate the span wrapping the form
-        span = driver.locator(f"#displaySpan{task_id}")
-        # Climb up to its <fieldset>
-        fieldset = span.locator("xpath=ancestor::fieldset[1]").first
-        legend   = fieldset.locator("legend").first
+        # 1) Ensure the legend is in the DOM
+        legend = frame.locator(legend_sel)
+        legend.wait_for(timeout=5_000)
 
-        # If it's hidden or effectively zero-height, click to expand
-        is_vis = span.is_visible()
-        box    = span.bounding_box() or {}
-        height = box.get("height", 0)
-        if not is_vis or height < 5:
-            legend.click()
-            # wait until our span becomes visible
-            driver.wait_for_selector(f"#displaySpan{task_id}", state="visible", timeout=5_000)
-
+        # 2) If the span is still hidden, click the legend
+        if not frame.locator(span_sel).is_visible():
+            legend.scroll_into_view_if_needed(timeout=5_000)
+            legend.click(force=True)
+            # 3) Wait for the span to become visible
+            frame.wait_for_selector(f"{span_sel}:not([style*='display:none'])",
+                                     timeout=5_000)
+        log(f"✅ Task {task_id} expanded")
+    except TimeoutError as e:
+        log(f"❌ expand_task(): Timeout waiting for legend or span → {e}")
     except Exception as e:
-        log_message(f"❌ expand_task(): Failed to expand Task ID {task_id}: {e}")
+        log(f"❌ expand_task(): Unexpected error expanding {task_id} → {e}")
 
 def handle_sigterm(signum, frame):
     print("Received SIGTERM, exiting gracefully.")
@@ -843,114 +863,68 @@ def summarize_job_types(results):
 
     return job_counter, other_types
 
-def run_with_progress(driver, complete_free=False):
-    results = []
-    errors = []
+def has_existing_notes(frame, task_id):
+    # grab everything in the span *before* the <form> tag
+    html = frame.locator(f"#displaySpan{task_id}").inner_html()
+    before_form = html.split("<form", 1)[0]
+    # strip out any tags and whitespace
+    plain = re.sub(r"<[^>]+>", "", before_form).strip()
+    return bool(plain)
 
+def run_with_progress(driver, complete_free=False):
+    results, errors = [], []
     due_tasks = extract_due_consultation_tasks(driver)
 
     for task in tqdm(due_tasks, desc="Processing consultation tasks", unit="task"):
         try:
+            # 1) parse job type
             job_type = parse_job_type_from_task(driver, task["url"])
+            is_free = is_free_job(job_type)[1]
+            is_bill = is_billable_job(job_type)[1]
+            task_id = None
 
-            _, is_free, _ = is_free_job(job_type)
-            _, is_bill, _ = is_billable_job(job_type)
+            # 2) open & expand
+            driver.goto(task["url"])
+            frame = driver.frame(name="MainView") or driver.main_frame()
+            expand_task(frame, task_id := extract_task_id_from_page(driver))
 
-            # ── Handle unknown jobs (notes-only) ─────────────────────────────
-            if not (is_free or is_bill):
-                log_message(
-                    f"⚠️ Unknown job type '{job_type}', will update notes only (no complete/billing)."
-                )
-                task_id = extract_task_id_from_page(driver)
-                if not task_id:
-                    log_message(f"⚠️ No Task ID found for '{task['desc']}', skipping")
-                    continue
+            # 3) skip if notes already exist
+            if has_existing_notes(frame, task_id):
+                log_message(f"⏭️ Task {task_id} already has notes, skipping")
+                continue
 
-                summary_text = format_dispatch_summary(driver)
-                if not summary_text:
-                    log_message(f"⚠️ No summary for Task {task_id}, skipping")
-                    continue
+            # 4) format summary
+            summary_text = format_dispatch_summary(driver)
+            if not summary_text:
+                log_message(f"⚠️ No summary for Task {task_id}, skipping")
+                continue
 
-                timed_goto(driver, task["url"])
-                driver.wait_for_selector(
-                    "iframe#MainView", timeout=PAGE_TIMEOUT * 1000
-                )
-                expand_task(driver, task_id)
 
-                if notes_already_contain_summary(driver, task_id, summary_text):
-                    log_message(
-                        f"⏭️ Task {task_id} already has summary notes, skipping update"
-                    )
-                    continue
-
-                update_notes_only(driver, task_id, summary_text)
-                log_message(
-                    f"✔️ Task {task_id} (Unknown job) notes updated only (no complete/bill)"
-                )
+            driver.goto(task["url"])
+            frame = driver.frame(name="MainView") or driver.main_frame()
+            expand_task(frame, task_id)
+            # 5) finalize in one shot
+            success = finalize_task(driver.page, task_id, summary_text, is_free)
+            if success:
+                mode = "Free" if is_free else "Billable"
+                log_message(f"✔️ Task {task_id} {mode} completed")
                 results.append({
                     "Company":     task["company"],
                     "Description": task["desc"],
                     "URL":         task["url"],
                     "Job Type":    job_type,
                     "Task ID":     task_id,
-                    "Mode":        "Unknown-NotesOnly"
+                    "Mode":        mode
                 })
-                continue
-
-            # ── Known jobs (free or billable) ────────────────────────────────
-            results.append({
-                "Company":     task["company"],
-                "Description": task["desc"],
-                "URL":         task["url"],
-                "Job Type":    job_type
-            })
-
-            task_id = extract_task_id_from_page(driver)
-            if not task_id:
-                log_message(f"⚠️ No Task ID found for '{task['desc']}', skipping")
-                continue
-
-            summary_text = format_dispatch_summary(driver)
-            if not summary_text:
-                log_message(f"⚠️ No summary for Task {task_id}, skipping")
-                continue
-
-            timed_goto(driver, task["url"])
-            driver.wait_for_selector(
-                "iframe#MainView", timeout=PAGE_TIMEOUT * 1000
-            )
-            expand_task(driver, task_id)
-
-            success = finalize_task(driver, task_id, summary_text, is_free)
-            if success:
-                action = (
-                    "(DRY RUN) notes updated" if DRY_RUN else
-                    "completed free"      if is_free else
-                    "charged & closed"
-                )
-                log_message(f"✔️ Task {task_id} {action}")
             else:
                 log_message(f"⚠️ Failed to finalize Task {task_id}")
-
-            results.append({
-                "Company":     task["company"],
-                "Description": task["desc"],
-                "URL":         task["url"],
-                "Job Type":    job_type,
-                "Task ID":     task_id,
-                "Mode":        "Free" if is_free else "Billable"
-            })
+                debug_frame_html(driver)
 
         except Exception as e:
             tb = traceback.format_exc()
-            errors.append({
-                "Task":      task,
-                "Error":     str(e),
-                "Traceback": tb
-            })
+            errors.append({"Task": task, "Error": str(e), "Traceback": tb})
             log_message(f"❌ Error for {task['desc']} — {e}")
             log_message(tb)
-            continue
 
     return results, errors
 
@@ -990,7 +964,6 @@ def debug_frame_html(driver):
     for i in range(min(5, links.count())):
         a = links.nth(i)
         print(f"  • {a.inner_text().strip()!r} → {a.get_attribute('href')}")
-
 
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, handle_sigterm)
