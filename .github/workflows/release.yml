@@ -6,10 +6,10 @@ on:
     branches: [ main ]
 
 permissions:
-  contents: read   # for actions/checkout, build, etc.
+  contents: write   # for actions/checkout, build, etc.
   pages: write     # to push to gh-pages
   id-token: write  # if you ever use OIDC (optional)
-  
+
 jobs:
   build:
     runs-on: ubuntu-latest
