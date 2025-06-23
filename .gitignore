@@ -1,0 +1,19 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtualenv
+.venv/
+
+# PyUpdater staging folders
+deploy/
+# (if you don’t want to check in your signing keys, add:)
+pyu-data/keys/
+
+# Editor / OS cruft
+.vscode/
+*.log
+.DS_Store
+.json
+.html

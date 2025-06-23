@@ -1,0 +1,20 @@
+{
+  "config_dir": "C:\\Users\\keith\\OneDrive\\Desktop\\2025\\projects\\TaskScraper\\.pyupdater",
+  "filename": "C:\\Users\\keith\\OneDrive\\Desktop\\2025\\projects\\TaskScraper\\.pyupdater\\config.pyu",
+  "count": 0,
+  "app_config": {
+    "APP_NAME": "TaskScraper",
+    "CLIENT_CONFIG_PATH": [
+      "client_config.py"
+    ],
+    "COMPANY_NAME": "Jackson K",
+    "PLUGIN_CONFIGS": {},
+    "UPDATE_PATCHES": true,
+    "MAX_DOWNLOAD_RETRIES": 3,
+    "HTTP_TIMEOUT": 30,
+    "UPDATE_URLS": [
+      "https://dasonofposeidon.github.io/TaskScraper/"
+    ],
+    "DATA_DIR": "C:\\Users\\keith\\OneDrive\\Desktop\\2025\\projects\\TaskScraper"
+  }
+}
