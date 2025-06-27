@@ -5,6 +5,7 @@ import sys
 import signal
 import traceback
 import getpass
+import subprocess
 from pathlib import Path
 from urllib.parse import urljoin
 from tqdm import tqdm
@@ -12,26 +13,56 @@ from rapidfuzz import fuzz, process
 from datetime import datetime, date
 from collections import Counter, defaultdict
 from dotenv import load_dotenv, set_key
+from tkinter import messagebox, Tk
+from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeout, Error as PlaywrightError
+import argparse
+from pyupdater.client import Client
+from client_config import ClientConfig
 
-HERE        = os.path.abspath(os.path.dirname(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(HERE, os.pardir))
-STATE_PATH = os.path.join(PROJECT_ROOT, "state.json")
+def get_project_root() -> str: #Returns the root directory of the project as a string path.
+    # return string path for PROJECT_ROOT
+    if getattr(sys, "frozen", False):
+        exe_path = Path(sys.executable).resolve()
+        parent = exe_path.parent
+        if parent.name.lower() == "bin":
+            root = parent.parent
+        else:
+            root = parent
+    else:
+        file_path = Path(__file__).resolve()
+        parent = file_path.parent
+        if parent.name.lower() == "bin":
+            root = parent.parent
+        else:
+            root = parent.parent  # adjust as needed
+    return str(root)
+
+# Then:
+PROJECT_ROOT = get_project_root()
 OUTPUT_DIR  = os.path.join(PROJECT_ROOT, "Outputs")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 ENV_PATH    = os.path.join(PROJECT_ROOT, ".env")
-LOG_FILE = os.path.join(OUTPUT_DIR, "consultation_log.txt")
+BROWSERS    = os.path.join(PROJECT_ROOT, "browsers")
+LOG_FOLDER  = os.path.join(PROJECT_ROOT, "logs")
+LOG_FILE    = os.path.join(LOG_FOLDER, "consulation_log.txt")
+STATE_PATH = os.path.join(PROJECT_ROOT, "state.json")
+
+
+UPDATE_MODE = None
+
+# ensure folders exist
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(LOG_FOLDER, exist_ok=True)
+os.makedirs(BROWSERS, exist_ok=True)
+
+# === CONFIGURATION ===
+load_dotenv(dotenv_path=ENV_PATH)
 
 TASK_URL = "http://inside.sockettelecom.com/menu.php?tabid=45&tasktype=2&nID=1439&width=1440&height=731"
 PAGE_TIMEOUT = 15
 
 DRY_RUN = False
 
-if getattr(sys, "frozen", False):
-    # sys._MEIPASS is the temp folder where PyInstaller unpacks data files
-    base_path = sys._MEIPASS
-else:
-    # running in “dev” mode, point at your source tree
-    base_path = os.path.dirname(__file__)
+__version__ = "0.1.0"
 
 def normalize_string(s):
     return re.sub(r'[^a-z0-9 ]+', '', s.lower()).strip()
@@ -52,7 +83,7 @@ JOB_TYPE_CATEGORIES = {
     "Unknown": set()
 }
 
-from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeout
+
 class PlaywrightDriver:
     def __init__(self,
                  headless: bool = True,
@@ -87,8 +118,8 @@ class PlaywrightDriver:
             return self.page.goto(url, timeout=timeout, wait_until="load")
         
 
-    def save_state(self, path: str = STATE_PATH):
-        self.context.storage_state(path=path)
+    def save_state(self):
+        self.context.storage_state(path=STATE_PATH)
 
     def __getattr__(self, name):
         return getattr(self.page, name)
@@ -179,6 +210,111 @@ def clear_first_time_overlays(page):
                 page.wait_for_timeout(200)
             except PlaywrightTimeout:
                 break
+
+def install_chromium(log=print):
+    log("=== install_chromium started ===")
+    try:
+        log(f"sys.frozen={getattr(sys, 'frozen', False)}")
+        if getattr(sys, "frozen", False):
+            log("Frozen branch: importing playwright.__main__")
+            try:
+                import playwright.__main__ as pw_cli
+                log("Imported playwright.__main__ successfully")
+            except Exception as ie:
+                log(f"ImportError playwright.__main__: {ie}\n{traceback.format_exc()}")
+                raise RuntimeError("Playwright package not found in the frozen bundle.") from ie
+
+            old_argv = sys.argv.copy()
+            sys.argv = ["playwright", "install", "chromium"]
+            try:
+                log("Calling pw_cli.main()")
+                try:
+                    pw_cli.main()
+                    log("pw_cli.main() returned normally")
+                except SystemExit as se:
+                    log(f"pw_cli.main() called sys.exit({se.code}); continuing")
+                    # You may check se.code: 0 means success; non-zero means failure.
+                    if se.code != 0:
+                        raise RuntimeError(f"playwright install exited with code {se.code}")
+                except Exception as e:
+                    log(f"Exception inside pw_cli.main(): {e}\n{traceback.format_exc()}")
+                    raise
+            finally:
+                sys.argv = old_argv
+        else:
+            log("Script mode branch: calling subprocess")
+            cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+            log(f"Subprocess command: {cmd}")
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            log(f"Subprocess return code: {proc.returncode}")
+            if proc.stdout:
+                log(f"Subprocess stdout: {proc.stdout.strip()}")
+            if proc.stderr:
+                log(f"Subprocess stderr: {proc.stderr.strip()}")
+            if proc.returncode != 0:
+                raise RuntimeError(f"playwright install failed, return code {proc.returncode}")
+    except Exception as e:
+        log(f"Exception in install_chromium: {e}\n{traceback.format_exc()}")
+        # Show error to user
+        try:
+            from tkinter import messagebox, Tk
+            root = Tk(); root.withdraw()
+            messagebox.showerror("Playwright Error", f"Failed to install Chromium:\n{e}\nSee diagnostic.log")
+            root.destroy()
+        except Exception as gui_e:
+            print(f"Playwright install error: {e}; plus GUI error: {gui_e}")
+        # Re-raise so caller knows install failed
+        raise
+    log("=== install_chromium finished ===")
+
+def is_chromium_installed():
+    """
+    Try launching Chromium headless via sync API. Returns True if successful.
+    """
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except PlaywrightError:
+        return False
+    except Exception:
+        return False
+
+def ensure_playwright(log=print):
+    """
+    Sync check: if Chromium not installed or broken, run install_chromium().
+    """
+    try:
+        if not is_chromium_installed():
+            # Inform user
+            try:
+                root = Tk()
+                root.withdraw()
+                messagebox.showinfo("Playwright", "Chromium not found; downloading browser binaries now. This may take a few minutes.")
+                root.destroy()
+            except Exception:
+                print("Chromium not found; downloading browser binaries now...")
+
+            install_chromium()
+
+            # After install, re-check
+            if not is_chromium_installed():
+                raise RuntimeError("Install completed but Chromium still not launchable.")
+    except Exception as e:
+        # Log and show error to user, referencing the log file
+        err_msg = f"Playwright setup failed: {e}\nSee log file for details"
+        log(err_msg)
+        try:
+            root = Tk()
+            root.withdraw()
+            messagebox.showerror("Playwright Error", err_msg)
+            root.destroy()
+        except Exception:
+            print(err_msg)
+        # Optionally exit or re-raise
+        raise
+
 
 def log_message(msg, also_print=False):
     timestamp = datetime.now().strftime("[%H:%M:%S]")
@@ -965,22 +1101,57 @@ def debug_frame_html(driver):
         a = links.nth(i)
         print(f"  • {a.inner_text().strip()!r} → {a.get_attribute('href')}")
 
+def check_for_update():
+    client = Client(ClientConfig(), refresh=True)
+    latest = client.update_check(ClientConfig.APP_NAME, __version__)
+    if not latest:
+        print("✓ No update available.")
+        return
+    print(f"⬆️  Update found! {latest.version} → downloading…")
+    if client.download(latest):
+        print("✅ Download complete, restarting into new version…")
+        client.extract_restart()  # replaces EXE and relaunches
+    else:
+        print("❌ Download failed.")
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--update',
+        action='store_true',
+        help="Check for a new version and apply it"
+    )
+    parser.add_argument(
+        '--version',
+        action='store_true',
+        help="Print current version and exit"
+    )
+    args, remaining = parser.parse_known_args()
+
+    if args.version:
+        print(__version__)
+        sys.exit(0)
+
+    if args.update:
+        check_for_update()
+        sys.exit(0)
     signal.signal(signal.SIGTERM, handle_sigterm)
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSERS
+    print(f"PLAYWRIGHT_BROWSERS_PATH set to {BROWSERS}")
+    ensure_playwright()
 
     # clear log
     with open(LOG_FILE, "w", encoding="utf-8"):
         pass
     
     PW = sync_playwright().start()
-    browser = PW.chromium.launch(headless=False)
+    browser = PW.chromium.launch(headless=True)
 
     try:
         driver = PlaywrightDriver(
-            headless=False,
+            headless=True,
             playwright=PW,
             browser=browser,
-            state_path=STATE_PATH
         )
         page = driver.page
         attach_network_listeners(page)
@@ -1009,4 +1180,6 @@ if __name__ == "__main__":
             PW.stop()
         except Exception:
             pass
+        input("Press Enter to exit...")
+        sys.exit(0)
     

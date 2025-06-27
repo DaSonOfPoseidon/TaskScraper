@@ -1,0 +1,9 @@
+tkinterdnd2
+tkcalendar
+python-dotenv
+pandas
+openpyxl
+playwright
+python-dateutil
+rapidfuzz
+tqdm

@@ -3,7 +3,7 @@
   "filename": "C:\\Users\\keith\\OneDrive\\Desktop\\2025\\projects\\TaskScraper\\.pyupdater\\config.pyu",
   "count": 0,
   "app_config": {
-    "APP_NAME": "TaskScraper",
+    "APP_NAME": "ConsultationCrusher",
     "CLIENT_CONFIG_PATH": [
       "client_config.py"
     ],
@@ -16,5 +16,17 @@
       "https://dasonofposeidon.github.io/TaskScraper/"
     ],
     "DATA_DIR": "C:\\Users\\keith\\OneDrive\\Desktop\\2025\\projects\\TaskScraper"
+  },
+  "keypack": {
+    "client": {
+      "offline_public": "KU20Ac+N8JEWcUhR667AbODhJjJuf0RoAmLA+QPFPmI"
+    },
+    "repo": {
+      "app_private": "rLlVto/g8DoOLZLK6UpSOXHIxgHgy48K57vhGKm6NzU"
+    },
+    "upload": {
+      "app_public": "4FdK0Lex1O0XdYcAMv5RHurzuHOIq5SFXYquHhxjrmY",
+      "signature": "DsD/mK+lj5WTmGMoybE7YG7t8Ot5s6ycxzVphY09JUjanA9MhxZfgDo9BD1E+ImwO4x8NgLhP2kSX4q6ChoWDA"
+    }
   }
 }

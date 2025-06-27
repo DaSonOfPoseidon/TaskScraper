@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -25,11 +25,17 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pyinstaller pyupdater pyupdater-http
+          pip install -r requirements.txt pyinstaller pyupdater pyupdater-http
+
+      - name: Install Playwright browsers
+        run: |
+          set PLAYWRIGHT_BROWSERS_PATH=0
+          playwright install chromium
 
       - name: Build & package
         run: |
-          pyupdater pkg --process
+          pyinstaller --noconfirm --windowed --name ConstulationCrusher backend.py
+          pyupdater pkg --app-name "ConsultationCrusher" --version $VERSION_TASKS --process
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
