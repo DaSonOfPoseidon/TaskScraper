@@ -1,44 +1,86 @@
-name: Build & Publish Updates
+name: Build and Release EXE
 
 on:
   push:
-    # or: tags: [ 'v*.*.*' ]
-    branches: [ main ]
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
-  contents: write   # for actions/checkout, build, etc.
-  pages: write     # to push to gh-pages
-  id-token: write  # if you ever use OIDC (optional)
+  contents: write   # needed for release creation and asset upload
+  actions: write
+
+env:
+  EXE_REPO: DaSonOfPoseidon/exeFiles
 
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
-      - name: Checkout code
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: 3.11
 
       - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller pyupdater pyupdater-http
+        run: pip install -r requirements.txt
 
-      - name: Install Playwright browsers
+      - id: extract_version
+        shell: pwsh
         run: |
-          set PLAYWRIGHT_BROWSERS_PATH=0
-          playwright install chromium
+          $text = Get-Content -Raw -Encoding UTF8 backend.py
+          if ($text -match '(?m)^\s*__version__\s*=\s*["'']([^"'']+)["'']') {
+            Write-Output "VERSION=$($matches[1])" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            throw "Version not found in backend.py"
+          }
 
-      - name: Build & package
+      - name: Build executable
+        run: pyinstaller ConsultationCrusher.spec
+
+      - name: Create and push tag
+        shell: bash
         run: |
-          pyinstaller --noconfirm --windowed --name ConstulationCrusher backend.py
-          pyupdater pkg --app-name "ConsultationCrusher" --version $VERSION_TASKS --process
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          TAG="v${{ env.VERSION }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping push"
+          else
+            git tag -a "$TAG" -m "Release version $TAG"
+            git push origin "$TAG"
+          fi
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
+      - name: Create or update GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./deploy   # this is where pyupdater outputs
+          tag_name: v${{ env.VERSION }}
+          name: Release v${{ env.VERSION }}
+          body: Automated release of ConsultationCrusher.exe version v${{ env.VERSION }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload EXE to release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ env.VERSION }}   # add this line to specify which release
+          files: dist/ConsultationCrusher.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger exeFiles update
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.PAT }}
+          repository: ${{ env.EXE_REPO }}
+          event-type: exe_update
+          client-payload: |
+            {
+              "exe_name": "ConsultationCrusher.exe",
+              "version": "${{ env.VERSION }}",
+              "release_repo": "TaskScraper"
+            }

@@ -23,7 +23,6 @@ pyu-data/
 .DS_Store
 .json
 .html
-*.spec
 
 # PyUpdater configuration files
 keypack.pyu

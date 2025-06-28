@@ -60,7 +60,7 @@ PAGE_TIMEOUT = 15
 
 DRY_RUN = False
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 def normalize_string(s):
     return re.sub(r'[^a-z0-9 ]+', '', s.lower()).strip()
