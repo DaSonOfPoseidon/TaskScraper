@@ -5,7 +5,7 @@ a = Analysis(
     ['backend.py'],
     pathex=[],
     binaries=[],
-    datas=[()],
+    datas=[],
     hiddenimports=['playwright.__main__'],
     hookspath=[],
     hooksconfig={},
