@@ -16,8 +16,6 @@ from dotenv import load_dotenv, set_key
 from tkinter import messagebox, Tk
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeout, Error as PlaywrightError
 import argparse
-from pyupdater.client import Client
-from client_config import ClientConfig
 
 def get_project_root() -> str: #Returns the root directory of the project as a string path.
     # return string path for PROJECT_ROOT
@@ -1102,17 +1100,7 @@ def debug_frame_html(driver):
         print(f"  • {a.inner_text().strip()!r} → {a.get_attribute('href')}")
 
 def check_for_update():
-    client = Client(ClientConfig(), refresh=True)
-    latest = client.update_check(ClientConfig.APP_NAME, __version__)
-    if not latest:
-        print("✓ No update available.")
-        return
-    print(f"⬆️  Update found! {latest.version} → downloading…")
-    if client.download(latest):
-        print("✅ Download complete, restarting into new version…")
-        client.extract_restart()  # replaces EXE and relaunches
-    else:
-        print("❌ Download failed.")
+    return
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
