@@ -38,11 +38,12 @@ def get_project_root() -> str: #Returns the root directory of the project as a s
 # Then:
 PROJECT_ROOT = get_project_root()
 OUTPUT_DIR  = os.path.join(PROJECT_ROOT, "Outputs")
-ENV_PATH    = os.path.join(PROJECT_ROOT, ".env")
+MISC_DIR = os.path.join(PROJECT_ROOT, "Misc")
+ENV_PATH    = os.path.join(MISC_DIR, ".env")
 BROWSERS    = os.path.join(PROJECT_ROOT, "browsers")
 LOG_FOLDER  = os.path.join(PROJECT_ROOT, "logs")
 LOG_FILE    = os.path.join(LOG_FOLDER, "consulation_log.txt")
-STATE_PATH = os.path.join(PROJECT_ROOT, "state.json")
+STATE_PATH = os.path.join(MISC_DIR, "state.json")
 
 
 UPDATE_MODE = None
@@ -60,7 +61,7 @@ PAGE_TIMEOUT = 15
 
 DRY_RUN = False
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 def normalize_string(s):
     return re.sub(r'[^a-z0-9 ]+', '', s.lower()).strip()
