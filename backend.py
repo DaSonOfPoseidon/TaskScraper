@@ -61,7 +61,7 @@ PAGE_TIMEOUT = 15
 
 DRY_RUN = False
 
-__version__ = "0.1.2"
+__version__ = "0.1.3" # 0.2 will be with fuzzy keyword matching
 
 def normalize_string(s):
     return re.sub(r'[^a-z0-9 ]+', '', s.lower()).strip()

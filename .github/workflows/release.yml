@@ -40,6 +40,8 @@ jobs:
 
       - name: Build executable
         run: pyinstaller ConsultationCrusher.spec
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create and push tag
         shell: bash
@@ -71,16 +73,3 @@ jobs:
           files: dist/ConsultationCrusher.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Trigger exeFiles update
-        uses: peter-evans/repository-dispatch@v2
-        with:
-          token: ${{ secrets.PAT }}
-          repository: ${{ env.EXE_REPO }}
-          event-type: exe_update
-          client-payload: |
-            {
-              "exe_name": "ConsultationCrusher.exe",
-              "version": "${{ env.VERSION }}",
-              "release_repo": "TaskScraper"
-            }
